@@ -44,10 +44,10 @@
 #include "verify.h"
 #include "version.h"
 
-
 #define CRACKALACK_KERNEL_PATH "crackalack.cl"
 #define CRACKALACK_NTLM8_KERNEL_PATH "crackalack_ntlm8.cl"
 #define CRACKALACK_NTLM9_KERNEL_PATH "crackalack_ntlm9.cl"
+// #define CRACKALACK_NETNTLMV1_KERNEL_PATH "crackalack_netntlmv1.cl"
 
 #define VERBOSE 1
 
@@ -75,12 +75,13 @@ void write_chains(char *filename, unsigned int chains_per_work_unit, cl_ulong *s
 
 
 struct hash_names {
-  char name[8];
+  char name[16];
   unsigned int type;
 };
 struct hash_names valid_hash_names[] = {
   {"lm", HASH_LM},
-  /*{"ntlm", HASH_NTLM}*/
+  {"netntlmv1", HASH_NETNTLMV1},
+  {"ntlm", HASH_NTLM},
 };
 
 
@@ -202,7 +203,7 @@ void *host_thread(void *ptr) {
   char *kernel_path = CRACKALACK_KERNEL_PATH, *kernel_name = "crackalack";
   size_t gws = 0, kernel_work_group_size = 0, kernel_preferred_work_group_size_multiple = 0;
   uint64_t *start_indices = NULL, *end_indices = NULL;
-  unsigned int i = 0, indices_size = 0, thread_complete = 0, num_passes = 0, pass = 0, chain_len = 0;
+  unsigned int i = 0, indices_size = 0, thread_complete = 0, num_passes = 0, pass = 0, chain_len = 0, charset_len = 0;
   /*time_t thread_start_time = 0;
   double elapsed = 0;*/
   int err = 0;
@@ -214,6 +215,13 @@ void *host_thread(void *ptr) {
   cl_mem hash_type_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, reduction_offset_buffer = NULL, chain_len_buffer = NULL, indices_buffer = NULL, pos_start_buffer = NULL;
 
   cl_uint pos_start = 0;
+
+  if ((strlen(args->charset) == 0) && (args->charset != NULL)) {
+    charset_len = 256;
+  }
+  else {
+    charset_len = strlen(args->charset);
+  }
 
 
   /* If we're generating the standard NTLM 8- or 9-character tables, use the special
@@ -337,7 +345,8 @@ void *host_thread(void *ptr) {
     /* Most of the parameters need only be set once upon first invokation. */
     if (hash_type_buffer == NULL) {
       CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(cl_uint));
-      CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, strlen(args->charset) + 1);
+      //CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, strlen(args->charset) + 1);
+      CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, charset_len + 1);
       CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(cl_uint));
       CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(cl_uint));
       CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(cl_uint));
@@ -502,6 +511,7 @@ int main(int ac, char **av) {
   cl_uint hash_type = 0, chain_len = 0, num_platforms = 0, num_devices = 0;
   uint64_t part_index = 0;
   int i = 0;
+  int charset_len = 0;
 
 
   ENABLE_CONSOLE_COLOR();
@@ -566,6 +576,13 @@ int main(int ac, char **av) {
     get_valid_charsets(buf, sizeof(buf));
     fprintf(stderr, "Error: charset \"%s\" not supported.  Valid values are: %s", charset_name, buf);
     exit(-1);
+  }
+
+  if (strcmp(charset_name, "byte") == 0) {
+    charset_len = 256;
+  }
+  else {
+    charset_len = strlen(charset);
   }
 
 
@@ -672,8 +689,10 @@ int main(int ac, char **av) {
     if (plaintext_len_max > (sizeof(plaintext_space_up_to_index) + 1)) {
       fprintf(stderr, "\n  !! Warning: plaintext length max is too large (%u > %"PRIu64").  Skipping start index safety check.\n\n", plaintext_len_max, sizeof(plaintext_space_up_to_index) + 1);  fflush(stderr);
     } else {
-      uint64_t plaintext_space_total = fill_plaintext_space_table(strlen(charset), plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index);
 
+      //fprintf(stderr, "charset_len: %d\n", charset_len);
+      uint64_t plaintext_space_total = fill_plaintext_space_table(charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index);
+      
       /* Ensure that the user didn't specify a part index so great that it
        * overflows the plaintext space total.  If so, calculate the largest
        * part index that can be used with this character set and tell the
@@ -684,7 +703,7 @@ int main(int ac, char **av) {
 	  highest_part_index--;
 
 	fprintf(stderr, "\n  !! Error: start index (%"PRIu64") + number of chains to generate (%u) > plaintext space total (%"PRIu64")!  The highest part index that can be generated without causing this overflow is %"PRIu64" (hint: you set the part index too high (%"PRIu64").\n\n", start_index, num_chains_to_generate, plaintext_space_total, highest_part_index, part_index); fflush(stderr);
-	exit(-1);
+	//exit(-1);
       }
     }
   }

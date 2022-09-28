@@ -8,8 +8,8 @@ inline unsigned int g_strncpy(char *dest, __global char *g_src, unsigned int n) 
   int i = 0;
   for (; i < n; i++) {
     dest[i] = g_src[i];
-    if (dest[i] == 0)
-      break;
+    //if (dest[i] == 0)
+    //  break;
   }
   return i;
 }

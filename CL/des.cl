@@ -31,7 +31,7 @@
 #define __const_a8 __constant
 #define DES_KEY_SIZE 8
 
-typedef uint uint32_t;
+//typedef uint uint32_t;
 
 /*
 typedef struct {

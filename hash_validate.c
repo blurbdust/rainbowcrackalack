@@ -28,6 +28,8 @@ cl_uint hash_str_to_type(char *hash_str) {
     ret = HASH_LM;
   else if (strcmp(hash_str, "ntlm") == 0)
     ret = HASH_NTLM;
+  else if (strcmp(hash_str, "netntlmv1") == 0)
+    ret = HASH_NETNTLMV1;
 
   return ret;
 }

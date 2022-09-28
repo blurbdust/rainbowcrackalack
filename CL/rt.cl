@@ -1,13 +1,18 @@
 #include "shared.h"
 #include "ntlm.cl"
+#include "netntlmv1.cl"
 
+/*
 #ifdef USE_DES_BITSLICE
 #include "des_bs.cl"
 #else
 #include "des.cl"
 #endif
-
+*/
 inline void index_to_plaintext(unsigned long index, char *charset, unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned long *plaintext_space_up_to_index, unsigned char *plaintext, unsigned int *plaintext_len) {
+  
+  //printf("index_to_plaintext\tindex: %x; charset[1]: %x; charset_len: %d; plaintext_len_min: %d\n", index, charset[1],  charset_len, plaintext_len_min);
+
   for (int i = plaintext_len_max - 1; i >= plaintext_len_min - 1; i--) {
     if (index >= plaintext_space_up_to_index[i]) {
       *plaintext_len = i + 1;
@@ -26,24 +31,11 @@ inline void index_to_plaintext(unsigned long index, char *charset, unsigned int 
 
 
 inline void do_hash(unsigned int hash_type, unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash_value, unsigned int *hash_len /*, __global unsigned char *g_debug*/) {
-#if HASH_TYPE == HASH_LM
-  for (int i = plaintext_len; i < 8; i++)
-    plaintext[i] = 0;
 
-/* For some reason, a very strange compiler error happens when the SK array is moved
- * into des.cl:des_encrypt().  Shelved for now... */
-#ifdef USE_DES_BITSLICE
-  des_encrypt(plaintext, hash_value);
-#else
+#if HASH_TYPE == HASH_NETNTLMV1
   uint32_t SK[32];
-  des_encrypt(SK, plaintext, hash_value /*, g_debug*/);
-#endif
-
+  netntlmv1_hash(SK, plaintext, hash_value /*, g_debug*/);
   *hash_len = 8;
-
-#elif HASH_TYPE == HASH_NTLM
-  ntlm_hash(plaintext, plaintext_len, hash_value /*, g_debug*/);
-  *hash_len = 16;
 #endif
 
   return;
@@ -109,6 +101,8 @@ inline unsigned long generate_rainbow_chain(
     unsigned int *plaintext_len,
     unsigned char *hash,
     unsigned int *hash_len) {
+
+  //printf("generate_rainbow_chain\thash_type: %x; charset[1]: %x; charset_len: %d; plaintext_len_min: %d; chain_len: %d\n", hash_type, charset, charset_len, plaintext_len_min, chain_len);
 
   unsigned long index = start;
   for (; pos < chain_len - 1; pos++) {

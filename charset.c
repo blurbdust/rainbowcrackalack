@@ -21,9 +21,10 @@
 
 struct charsets {
   char name[32];
-  char content[96];
+  char content[257];
 };
 struct charsets valid_charsets[] = {
+  {"byte", CHARSET_BYTE},
   {"numeric", CHARSET_NUMERIC},
   {"alpha", CHARSET_ALPHA},
   {"alpha-numeric", CHARSET_ALPHA_NUMERIC},

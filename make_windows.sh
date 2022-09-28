@@ -1,9 +1,9 @@
 #!/bin/bash
 
-CP=/bin/cp
+CP=/usr/bin/cp
 MAKE=/usr/bin/make
-MKTEMP=/bin/mktemp
-RM=/bin/rm
+MKTEMP=/usr/bin/mktemp
+RM=/usr/bin/rm
 
 TEMPDIR=`$MKTEMP -d -t rcrackalack_XXXXXXXXXXX`
 $CP -R /usr/include/CL $TEMPDIR

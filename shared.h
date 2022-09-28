@@ -8,10 +8,11 @@
 #define HASH_NTLM 2
 #define HASH_MD5 3
 #define HASH_SHA1 4
+#define HASH_NETNTLMV1 9
 
 #define MAX_PLAINTEXT_LEN 16
 #define MAX_HASH_OUTPUT_LEN 16
-#define MAX_CHARSET_LEN 96
+#define MAX_CHARSET_LEN 256
 
 #define DEBUG_LEN 32
 

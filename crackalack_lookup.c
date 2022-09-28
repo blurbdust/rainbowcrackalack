@@ -55,9 +55,12 @@
 #define PRECOMPUTE_KERNEL_PATH "precompute.cl"
 #define PRECOMPUTE_NTLM8_KERNEL_PATH "precompute_ntlm8.cl"
 #define PRECOMPUTE_NTLM9_KERNEL_PATH "precompute_ntlm9.cl"
+#define PRECOMPUTE_NETNTLMV1_KERNEL_PATH "precompute_netntlmv1.cl"
+
 #define FALSE_ALARM_KERNEL_PATH "false_alarm_check.cl"
 #define FALSE_ALARM_NTLM8_KERNEL_PATH "false_alarm_check_ntlm8.cl"
 #define FALSE_ALARM_NTLM9_KERNEL_PATH "false_alarm_check_ntlm9.cl"
+#define FALSE_ALARM_NETNTLMV1_KERNEL_PATH "false_alarm_check_ntlm9.cl"
 
 #define HASH_FILE_FORMAT_PLAIN 1
 #define HASH_FILE_FORMAT_PWDUMP 2
@@ -332,7 +335,7 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
     exit(-1);
   }
 
-  plaintext_space_total = fill_plaintext_space_table(strlen(args->charset), args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table(256, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
 
   /* Collate all the start indices into one buffer. */
   ppi_cur = ppi;
@@ -650,7 +653,7 @@ void *host_thread_false_alarm(void *ptr) {
   /*cl_ulong debug_ulong[128] = {0};*/
 
 
-  plaintext_space_total = fill_plaintext_space_table(strlen(args->charset), args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table(256, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
 
   num_start_indices = num_start_index_positions = num_hash_base_indices = num_plaintext_indices = args->num_potential_start_indices;
 
