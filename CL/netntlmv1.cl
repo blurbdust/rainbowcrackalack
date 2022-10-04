@@ -585,7 +585,7 @@ inline void DES_bs_get_source_LM(unsigned char *out, uint32_t *raw)
 
 
 
-inline void des_encrypt(char *plaintext, unsigned char *out) {
+inline void netntlmv1_hash(char *plaintext, unsigned char *out) {
   vtype B[64];
   lm_vector lm_keys[56];
 

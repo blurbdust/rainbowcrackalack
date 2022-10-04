@@ -33,8 +33,8 @@ inline void index_to_plaintext(unsigned long index, char *charset, unsigned int 
 inline void do_hash(unsigned int hash_type, unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash_value, unsigned int *hash_len /*, __global unsigned char *g_debug*/) {
 
 #if HASH_TYPE == HASH_NETNTLMV1
-  uint32_t SK[32];
-  netntlmv1_hash(SK, plaintext, hash_value /*, g_debug*/);
+//  uint32_t SK[32];
+  netntlmv1_hash(plaintext, hash_value /*, g_debug*/);
   *hash_len = 8;
 #endif
 
