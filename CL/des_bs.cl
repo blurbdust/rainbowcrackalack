@@ -599,14 +599,33 @@ inline void des_encrypt(char *plaintext, unsigned char *out) {
 
   // This is the "KGS!@#$%" string, after the initial permutation is applied.
   vtype z = vzero, o = vones;
-  lm_set_block_8(B, 0, z, z, z, z, z, z, z, z);
-  lm_set_block_8(B, 8, o, o, o, z, o, z, z, z);
-  lm_set_block_8(B, 16, z, z, z, z, z, z, z, o);
-  lm_set_block_8(B, 24, z, z, o, z, z, o, o, o);
-  lm_set_block_8(B, 32, z, z, z, o, z, o, o, o);
-  lm_set_block_8(B, 40, z, z, z, z, z, o, z, z);
-  lm_set_block_8(B, 48, o, o, z, z, z, z, o, z);
-  lm_set_block_8(B, 56, o, z, o, z, o, o, o, o);
+
+  //lm_set_block_8(B, 0, z, z, z, z, z, z, z, z);  // 00000000; L->R: 00; R->L: 00
+  //lm_set_block_8(B, 8, o, o, o, z, o, z, z, z);  // 11101000; L->R: e8; R->L: 17
+  //lm_set_block_8(B, 16, z, z, z, z, z, z, z, o); // 00000001; L->R: 01; R->L: 80
+  //lm_set_block_8(B, 24, z, z, o, z, z, o, o, o); // 00100111; L->R: 27; R->L: e4
+
+  //lm_set_block_8(B, 32, z, z, z, o, z, o, o, o); // 00010111; L->R: 17; R->L: e8
+  //lm_set_block_8(B, 40, z, z, z, z, z, o, z, z); // 00000100; L->R: 04; R->L: 20
+  //lm_set_block_8(B, 48, o, o, z, z, z, z, o, z); // 11000010; L->R: c2; R->L: 43
+  //lm_set_block_8(B, 56, o, z, o, z, o, o, o, o); // 10101111; L->R: af; R->L: f5
+
+  lm_set_block_8(B, 0, o, o, o, o, z, z, z, z);  // 00000000; L->R: 00; R->L: 00
+  lm_set_block_8(B, 8, o, z, o, z, o, z, o, z);  // 11101000; L->R: e8; R->L: 17
+  lm_set_block_8(B, 16, o, o, o, o, z, z, z, z); // 00000001; L->R: 01; R->L: 80
+  lm_set_block_8(B, 24, o, z, o, z, o, z, o, z); // 00100111; L->R: 27; R->L: e4
+
+  lm_set_block_8(B, 32, z, z, z, z, z, z, z, z); // 00010111; L->R: 17; R->L: e8
+  lm_set_block_8(B, 40, o, o, z, z, o, o, z, o); // 00000100; L->R: 04; R->L: 20
+  lm_set_block_8(B, 48, z, z, z, z, z, z, z, z); // 11000010; L->R: c2; R->L: 43
+  lm_set_block_8(B, 56, o, o, z, z, o, o, z, o); // 10101111; L->R: af; R->L: f5
+
+
+  //1704c2af 
+  //00e80127
+
+
+
 
   // Perform DES using the plaintext as the key on the fixed bytes (above).
   H1_k0();

@@ -21,6 +21,9 @@ unsigned int get_optimal_gws(cl_device_id device) {
     else if (strcmp(name, "GeForce GTX 1070 Ti") == 0)
       return 19 * 768; /* NTLM 8-char: ?/s */
 
+    else if (strcmp(name, "GeForce GTX 770") == 0)
+      return 8 * 768; /* ??? */
+
     else if (strcmp(name, "GeForce GTX 1070") == 0)
       return 15 * 768; /* NTLM 8-char: 3,028/s */
 
@@ -55,6 +58,13 @@ unsigned int get_optimal_gws(cl_device_id device) {
       return 68 * 256;
 #else
       return 68 * 512;
+#endif
+
+    else if (strcmp(name, "GeForce RTX 3090") == 0)
+#ifdef _WIN32
+      return 82 * 256;
+#else
+      return 82 * 512;
 #endif
 
     else if (strcmp(name, "Tesla V100-SXM2-16GB") == 0) /* Amazon EC2 p3.2xlarge instance */
