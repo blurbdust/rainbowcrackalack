@@ -19,6 +19,16 @@
 #include "cpu_rt_functions.h"
 #include "shared.h"
 
+#include <gcrypt.h>
+#define GCRY_CIPHER GCRY_CIPHER_DES     // Use DES cipher
+#define GCRY_MODE GCRY_CIPHER_MODE_ECB  // Use ECB mode
+#define KEY_SIZE 8                      // DES key size in bytes
+#define BLOCK_SIZE 8                    // DES block size in bytes
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+
 
 uint64_t fill_plaintext_space_table(unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, uint64_t *plaintext_space_up_to_index) {
   uint64_t n = 1;
@@ -54,6 +64,8 @@ uint64_t hash_to_index(unsigned char *hash_value, unsigned int hash_len, unsigne
   ret <<= 8;
   ret |= hash_value[0];
 
+  //printf("hash_to_index \treturn: %llu, ret: %llu, reduction_offset: %u, pos: %u, plaintext_space_total: %llu\n", (ret + reduction_offset + pos) % plaintext_space_total, ret, reduction_offset, pos, plaintext_space_total);
+
   return (ret + reduction_offset + pos) % plaintext_space_total;
 }
 
@@ -61,6 +73,8 @@ uint64_t hash_to_index(unsigned char *hash_value, unsigned int hash_len, unsigne
 void index_to_plaintext(uint64_t index, char *charset, unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, uint64_t *plaintext_space_up_to_index, char *plaintext, unsigned int *plaintext_len) {
   int i;
   uint64_t index_x;
+
+  //printf("************************************** this function is CPU not GPU, index: %llu\n", index);
 
   for (i = plaintext_len_max - 1; i >= plaintext_len_min - 1; i--) {
     if (index >= plaintext_space_up_to_index[i]) {
@@ -76,6 +90,7 @@ void index_to_plaintext(uint64_t index, char *charset, unsigned int charset_len,
   index_x = index - plaintext_space_up_to_index[*plaintext_len - 1];
   for (i = *plaintext_len - 1; i >= 0; i--) {
     plaintext[i] = charset[index_x % charset_len];
+    //printf("appending %02x \n", plaintext[i]);
     index_x = index_x / charset_len;
   }
 
@@ -255,4 +270,62 @@ void md4_encrypt(unsigned int *hash, unsigned int *W)
 	hash[1] = hash[1] + 0xefcdab89;
 	hash[2] = hash[2] + 0x98badcfe;
 	hash[3] = hash[3] + 0x10325476;
+}
+
+void setup_des_key(char key_56[], unsigned char *key)
+{
+  //char key[8]= {0};
+
+  key[0] = key_56[0];
+  key[1] = (key_56[0] << 7) | (key_56[1] >> 1);
+  key[2] = (key_56[1] << 6) | (key_56[2] >> 2);
+  key[3] = (key_56[2] << 5) | (key_56[3] >> 3);
+  key[4] = (key_56[3] << 4) | (key_56[4] >> 4);
+  key[5] = (key_56[4] << 3) | (key_56[5] >> 5);
+  key[6] = (key_56[5] << 2) | (key_56[6] >> 6);
+  key[7] = (key_56[6] << 1);
+}
+
+/*
+void HashNetNTLMv1(
+  unsigned char *pData,
+  unsigned int  uLen,   // uLen == 7
+  unsigned char Hash[8])
+{
+  */
+void netntlmv1_hash(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash) {
+    gcry_control(GCRYCTL_DISABLE_SECMEM, 0); // Disable secure memory (optional)
+    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+
+    gcry_cipher_hd_t handle;
+    gcry_error_t err;
+
+    // Define key and plaintext
+    unsigned char magic[KEY_SIZE] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+
+    // Open cipher context
+    err = gcry_cipher_open(&handle, GCRY_CIPHER, GCRY_MODE, 0);
+    if (err) {
+        fprintf(stderr, "Failed to open cipher: %s\n", gcry_strerror(err));
+        return;
+    }
+
+    // Set the key for encryption
+    err = gcry_cipher_setkey(handle, plaintext, plaintext_len);
+    if (err) {
+        fprintf(stderr, "Failed to set key: %s\n", gcry_strerror(err));
+        gcry_cipher_close(handle);
+        return;
+    }
+
+    // Encrypt the plaintext
+    err = gcry_cipher_encrypt(handle, hash, BLOCK_SIZE, magic, BLOCK_SIZE);
+    if (err) {
+        fprintf(stderr, "Encryption failed: %s\n", gcry_strerror(err));
+        gcry_cipher_close(handle);
+        return;
+    }
+
+    // Clean up
+    gcry_cipher_close(handle);
 }

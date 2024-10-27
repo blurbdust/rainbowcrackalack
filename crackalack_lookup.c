@@ -60,7 +60,7 @@
 #define FALSE_ALARM_KERNEL_PATH "false_alarm_check.cl"
 #define FALSE_ALARM_NTLM8_KERNEL_PATH "false_alarm_check_ntlm8.cl"
 #define FALSE_ALARM_NTLM9_KERNEL_PATH "false_alarm_check_ntlm9.cl"
-#define FALSE_ALARM_NETNTLMV1_KERNEL_PATH "false_alarm_check_ntlm9.cl"
+#define FALSE_ALARM_NETNTLMV1_KERNEL_PATH "false_alarm_check_netntlv1.cl"
 
 #define HASH_FILE_FORMAT_PLAIN 1
 #define HASH_FILE_FORMAT_PWDUMP 2
@@ -300,7 +300,7 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   struct timespec start_time = {0};
   cl_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
 
-  unsigned int num_potential_start_indices = 0, i = 0, j = 0;
+  unsigned int num_potential_start_indices = 0, i = 0, j = 0; // init to -1 since 0 is possible index
   unsigned int total_devices = args[0].total_devices;
   cl_ulong plaintext_space_total = 0;
   double time_delta = 0.0;
@@ -316,9 +316,9 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
     num_potential_start_indices += ppi_cur->num_potential_start_indices;
     ppi_cur = ppi_cur->next;
   }
-
+  // nic come back
   /* If no potential matches were found, there's nothing else to do. */
-  if (num_potential_start_indices == 0) {
+  if (num_potential_start_indices == 0) { // was 0
     printf("No matches found in table.\n");
     return;
   }
@@ -334,8 +334,15 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
     fprintf(stderr, "Error while creating buffer for potential start indices/positions/hash indices/ppi refs.\n");
     exit(-1);
   }
+  int charset_len = 0;
+  if (strcmp(args->charset_name, "byte") == 0) {
+    charset_len = 256;
+  }
+  else {
+    charset_len = strlen(args->charset) + 1;
+  }
 
-  plaintext_space_total = fill_plaintext_space_table(256, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
 
   /* Collate all the start indices into one buffer. */
   ppi_cur = ppi;
@@ -379,6 +386,7 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
       perror("Failed to create thread");
       exit(-1);
     }
+    //printf("********************************** host_thread_false_alarm created\n");
   }
 
   /* Wait for all threads to finish. */
@@ -388,43 +396,78 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
       exit(-1);
     }
   }
+  //printf("********************************** host_thread_false_alarm joined\n");
 
   /* Search for valid results, and update the ppi with the plaintext. */
   for (i = 0; i < total_devices; i++) {
     for (j = 0; j < args[i].num_results; j++) {
       if (args[i].results[j] != 0) {
-	char plaintext[MAX_PLAINTEXT_LEN] = {0};
-	unsigned int plaintext_len = 0;
+      	char plaintext[MAX_PLAINTEXT_LEN] = {0};
+      	unsigned int plaintext_len = 0;
+        unsigned char real_key[8] = {0};
 
 
-	index_to_plaintext(args[i].results[j], args[i].charset, strlen(args[i].charset), args[i].plaintext_len_min, args[i].plaintext_len_max, plaintext_space_up_to_index, plaintext, &plaintext_len);
+      	index_to_plaintext(args[i].results[j], args[i].charset, charset_len, args[i].plaintext_len_min, args[i].plaintext_len_max, plaintext_space_up_to_index, plaintext, &plaintext_len);
 
-	/* Double check NTLM results to weed out super false alarms. */
-	if (args[i].hash_type == HASH_NTLM) {
-	  unsigned char hash[16] = {0};
-	  char hash_hex[(sizeof(hash) * 2) + 1] = {0};
+      	/* Double check NTLM results to weed out super false alarms. */
+      	if (args[i].hash_type == HASH_NTLM) {
+      	  unsigned char hash[16] = {0};
+      	  char hash_hex[(sizeof(hash) * 2) + 1] = {0};
 
 
-	  ntlm_hash(plaintext, plaintext_len, hash);
-	  if (!bytes_to_hex(hash, sizeof(hash), hash_hex, sizeof(hash_hex)) || \
-	      (strcmp(hash_hex, ppi_refs[j]->hash) != 0)) {
-	    /*printf("Found super false positive!: NTLM('%s') != %s\n", plaintext, ppi_refs[j]->hash);*/
-	    continue;
-	  }
-	} else
-	  printf("WARNING: CPU code to double-check this cracked hash has not yet been added.  There is a 60%% chance this is a false positive!  A workaround is to use John The Ripper to validate this result(s).\n");
+      	  ntlm_hash(plaintext, plaintext_len, hash);
+      	  if (!bytes_to_hex(hash, sizeof(hash), hash_hex, sizeof(hash_hex)) || \
+      	      (strcmp(hash_hex, ppi_refs[j]->hash) != 0)) {
+      	    /*printf("Found super false positive!: NTLM('%s') != %s\n", plaintext, ppi_refs[j]->hash);*/
+      	    continue;
+      	  }
+      	} else if (args[i].hash_type == HASH_NETNTLMV1) {
+          
+          setup_des_key(plaintext, real_key);
 
-	/* Its official: we cracked a hash! */
+          unsigned char hash[8] = {0};
+          char hash_hex[(sizeof(hash) * 2) + 1] = {0};
+          char rkey_hex[(sizeof(hash) * 2) + 1] = {0};
 
-	/* Save the plaintext, clear the precomputed end indices list (since its
-	 * no longer useful, save the hash/plaintext combo into the pot file, and
-	 * tell the user. */
-	ppi_refs[j]->plaintext = strdup(plaintext);
-	ppi_refs[j]->num_precomputed_end_indices = 0;
-	FREE(ppi_refs[j]->precomputed_end_indices);
+          
 
-	save_cracked_hash(ppi_refs[j], args[i].hash_type);
-        printf("%sHASH CRACKED => %s:%s%s\n", GREENB, (ppi_refs[j]->username != NULL) ? ppi_refs[j]->username : ppi_refs[j]->hash, plaintext, CLR);  fflush(stdout);
+
+          netntlmv1_hash(real_key, 8, hash);
+          //int ret = 0;
+          //ret = bytes_to_hex(real_key, sizeof(real_key), rkey_hex, sizeof(rkey_hex));
+          //printf("ret: %d, hash_hex: %s\n", ret, rkey_hex);
+          
+          if (!bytes_to_hex(hash, sizeof(hash), hash_hex, sizeof(hash_hex)) || \
+              (strcmp(hash_hex, ppi_refs[j]->hash) != 0)) {
+                printf("Found super false positive!: Net-NTLMv1('%s') != %s\n", rkey_hex, ppi_refs[j]->hash);
+            continue;
+          }
+          
+          
+        } else {
+      	  printf("WARNING: CPU code to double-check this cracked hash has not yet been added.  There is a 60%% chance this is a false positive!  A workaround is to use John The Ripper to validate this result(s).\n");
+        }
+
+      	/* Its official: we cracked a hash! */
+
+      	/* Save the plaintext, clear the precomputed end indices list (since its
+      	 * no longer useful, save the hash/plaintext combo into the pot file, and
+      	 * tell the user. */
+      	ppi_refs[j]->plaintext = strdup(plaintext);
+      	ppi_refs[j]->num_precomputed_end_indices = 0;
+      	FREE(ppi_refs[j]->precomputed_end_indices);
+
+      	save_cracked_hash(ppi_refs[j], args[i].hash_type);
+        if (args[i].hash_type == HASH_NETNTLMV1) {
+          printf("%sHASH CRACKED => %s:", GREENB, ppi_refs[j]->hash);
+          for (int n = 0; n < 8; n++) {
+            printf("%s%02x", GREENB, real_key[n]);
+          }
+          printf("%s\n", CLR);
+          fflush(stdout);
+        } else {
+          printf("%sHASH CRACKED => %s:%s%s\n", GREENB, (ppi_refs[j]->username != NULL) ? ppi_refs[j]->username : ppi_refs[j]->hash, plaintext, CLR);  fflush(stdout);
+        }
       }
     }
   }
@@ -651,9 +694,15 @@ void *host_thread_false_alarm(void *ptr) {
   cl_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
   size_t gws = 0, kernel_work_group_size = 0, kernel_preferred_work_group_size_multiple = 0;
   /*cl_ulong debug_ulong[128] = {0};*/
+  int charset_len = 0;
+  if (strcmp(args->charset_name, "byte") == 0) {
+    charset_len = 256;
+  }
+  else {
+    charset_len = strlen(args->charset) + 1;
+  }
 
-
-  plaintext_space_total = fill_plaintext_space_table(256, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
 
   num_start_indices = num_start_index_positions = num_hash_base_indices = num_plaintext_indices = args->num_potential_start_indices;
 
@@ -738,6 +787,7 @@ void *host_thread_false_alarm(void *ptr) {
   num_exec_blocks = num_start_indices / gws;
   if (num_start_indices % gws != 0)
     num_exec_blocks++;
+  //printf("num_exec_blocks: %d, num_start_indices: %d\n", num_exec_blocks, num_start_indices);
 
   output_block_len = gws;
   output_block = calloc(output_block_len, sizeof(cl_ulong));
@@ -747,7 +797,7 @@ void *host_thread_false_alarm(void *ptr) {
   }
 
   CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(cl_uint));
-  CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, strlen(args->charset) + 1);
+  CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, charset_len);
   CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(cl_uint));
   CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(cl_uint));
   CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(cl_uint));
@@ -791,19 +841,7 @@ void *host_thread_false_alarm(void *ptr) {
 
   /* Set the results so the main thread can access them. */
   args->results = plaintext_indices;
-  args->num_results = num_plaintext_indices;
-
-  /*
-  {
-    unsigned int i = 0;
-
-    printf("results: ");
-    for (i = 0; i < args->num_results; i++)
-      printf("%lu ", args->results[i]);
-
-    printf("\n");
-  }
-  */
+  args->num_results = num_plaintext_indices;  
 
   FREE(output_block);
 
@@ -928,11 +966,19 @@ void *host_thread_precompute(void *ptr) {
   /* Get the number of compute units in this device. */
   /*get_device_uint(gpu->device, CL_DEVICE_MAX_COMPUTE_UNITS, &(gpu->num_work_units));*/
 
+  int charset_len = 0;
+  if (strcmp(args->charset_name, "byte") == 0) {
+    charset_len = 256;
+  }
+  else {
+    charset_len = strlen(args->charset) + 1;
+  }
+
 
   CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(cl_uint));
   CLCREATEARG_ARRAY(1, hash_buffer, CL_RO, hash_binary, hash_binary_len);
   CLCREATEARG(2, hash_len_buffer, CL_RO, hash_binary_len, sizeof(cl_uint));
-  CLCREATEARG_ARRAY(3, charset_buffer, CL_RO, args->charset, strlen(args->charset) + 1);
+  CLCREATEARG_ARRAY(3, charset_buffer, CL_RO, args->charset, charset_len);
   CLCREATEARG(4, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(cl_uint));
   CLCREATEARG(5, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(cl_uint));
   CLCREATEARG(6, table_index_buffer, CL_RO, args->table_index, sizeof(cl_uint));
@@ -1544,7 +1590,15 @@ void rt_binary_search(cl_ulong *rainbow_table, unsigned int num_chains, precompu
 
 void save_cracked_hash(precomputed_and_potential_indices *ppi, unsigned int hash_type) {
   FILE *jtr_file = fopen(jtr_pot_filename, "ab"), *hashcat_file = fopen(hashcat_pot_filename, "ab");
-  unsigned int hash_len = strlen(ppi->hash), plaintext_len = strlen(ppi->plaintext);
+  unsigned int hash_len = 0, plaintext_len = 0;
+  if (hash_type == HASH_NETNTLMV1) {
+    hash_len = 8;
+    plaintext_len = 8;
+  }
+  else {
+    hash_len = strlen(ppi->hash);
+    plaintext_len = strlen(ppi->plaintext);
+  }
   char *dot_pos = strrchr(ppi->index_filename, '.');
 
 
@@ -2120,11 +2174,12 @@ int main(int ac, char **av) {
     exit(-1);
   }
 
-  /* At this time, only NTLM hashes are supported. */
+  /* At this time, only NTLM hashes are supported. 
   if (rt_params.hash_type != HASH_NTLM) {
     fprintf(stderr, "Unfortunately, only NTLM hashes are supported at this time.  Terminating.\n");
     exit(-1);
   }
+  */
 
   /* Ensure that valid hashes were provided. */
   if (rt_params.hash_type == HASH_NTLM) {

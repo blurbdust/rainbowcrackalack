@@ -16,4 +16,8 @@ uint64_t generate_rainbow_chain(unsigned int hash_type, char *charset, unsigned 
 
 void md4_encrypt(unsigned int *hash, unsigned int *W);
 
+void setup_des_key(char key_56[], unsigned char *key);
+
+void netntlmv1_hash(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash);
+
 #endif

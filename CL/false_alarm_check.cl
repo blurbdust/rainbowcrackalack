@@ -47,6 +47,9 @@ __kernel void false_alarm_check(
     index_to_plaintext(index, charset, charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index, plaintext, &plaintext_len);
     do_hash(hash_type, plaintext, plaintext_len, hash, &hash_len);
 
+    //printf("hash_type: %d, plaintext: %x, plaintext_len: %x, hash: %x\n", hash_type, plaintext, plaintext_len, hash);
+    //printf("previous_index: %d, index: %d, hash_base_index: %d, pos: %d, plaintext_space_total: %d, index_pos: %d\n", previous_index, index, hash_base_index, pos, plaintext_space_total, index_pos);
+
     previous_index = index;
     index = hash_to_index(hash, hash_len, reduction_offset, plaintext_space_total, pos);
 

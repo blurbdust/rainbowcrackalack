@@ -11,7 +11,7 @@
 */
 inline void index_to_plaintext(unsigned long index, char *charset, unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned long *plaintext_space_up_to_index, unsigned char *plaintext, unsigned int *plaintext_len) {
   
-  //printf("index_to_plaintext\tindex: %x; charset[1]: %x; charset_len: %d; plaintext_len_min: %d\n", index, charset[1],  charset_len, plaintext_len_min);
+  //printf("index_to_plaintext .CL\tindex: %x; charset[1]: %02x; charset_len: %d; plaintext_len_min: %d\n", index, charset[1],  charset_len, plaintext_len_min);
 
   for (int i = plaintext_len_max - 1; i >= plaintext_len_min - 1; i--) {
     if (index >= plaintext_space_up_to_index[i]) {
@@ -33,8 +33,8 @@ inline void index_to_plaintext(unsigned long index, char *charset, unsigned int 
 inline void do_hash(unsigned int hash_type, unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash_value, unsigned int *hash_len /*, __global unsigned char *g_debug*/) {
 
 #if HASH_TYPE == HASH_NETNTLMV1
-//  uint32_t SK[32];
-  netntlmv1_hash(plaintext, hash_value /*, g_debug*/);
+  uint32_t SK[32];
+  netntlmv1_hash(SK, plaintext, hash_value /*, g_debug*/);
   *hash_len = 8;
 #endif
 

@@ -7,7 +7,7 @@ LINK_OPTIONS=-lpthread
 # If we're doing a Windows build...
 ifneq ($(WINDOWS_BUILD),)
   COMPILE_OPTIONS += -I$(CL_INCLUDE)
-  LINK_OPTIONS += -static -lbcrypt
+  LINK_OPTIONS += -static -lbcrypt -lgcrypt -lgpg-error -lws2_32
 
   ENUMERATE_PROG=enumerate_chain.exe
   GEN_PROG=crackalack_gen.exe
@@ -18,7 +18,7 @@ ifneq ($(WINDOWS_BUILD),)
   UNITTEST_PROG=crackalack_unit_tests.exe
   VERIFY_PROG=crackalack_verify.exe
 else
-  LINK_OPTIONS += -ldl
+  LINK_OPTIONS += -ldl -lgcrypt
 
   ENUMERATE_PROG=enumerate_chain
   GEN_PROG=crackalack_gen
@@ -63,7 +63,7 @@ $(PERFECTIFY_PROG):	clock.o perfectify.o
 	$(CC) $(COMPILE_OPTIONS) -o $(PERFECTIFY_PROG) clock.o perfectify.o
 
 $(ENUMERATE_PROG):	cpu_rt_functions.o enumerate_chain.o test_shared.o
-	$(CC) $(COMPILE_OPTIONS) -o $(ENUMERATE_PROG) cpu_rt_functions.o enumerate_chain.o test_shared.o
+	$(CC) $(COMPILE_OPTIONS) -o $(ENUMERATE_PROG) cpu_rt_functions.o enumerate_chain.o test_shared.o $(LINK_OPTIONS)
 
 
 clean:

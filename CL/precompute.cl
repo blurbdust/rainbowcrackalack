@@ -42,7 +42,7 @@ __kernel void precompute(
   g_memcpy(hash, g_hash, *g_hash_len);
   index = hash_to_index(hash, hash_len, reduction_offset, plaintext_space_total, target_chain_len - 1);
 
-  for(unsigned int i = target_chain_len; i < chain_len - 1; i++) {
+  for(unsigned int i = target_chain_len; i < chain_len - 1; i++) { // was chain_len - 1
     index_to_plaintext(index, charset, charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index, plaintext, &plaintext_len);
     do_hash(hash_type, plaintext, plaintext_len, hash, &hash_len);
     index = hash_to_index(hash, hash_len, reduction_offset, plaintext_space_total, i);
