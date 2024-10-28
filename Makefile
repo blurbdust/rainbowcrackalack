@@ -3,12 +3,12 @@
 CC=gcc
 CL_INCLUDE=/usr/include/CL
 COMPILE_OPTIONS=-Wall -g -O3
-LINK_OPTIONS=-lpthread
+LINK_OPTIONS=-lpthread -lgcrypt
 
 # If we're doing a Windows build...
 ifneq ($(WINDOWS_BUILD),)
   COMPILE_OPTIONS += -I$(CL_INCLUDE)
-  LINK_OPTIONS += -static -lbcrypt -lgcrypt -lgpg-error -lws2_32
+  LINK_OPTIONS += -static -lbcrypt -lgpg-error -lws2_32
 
   ENUMERATE_PROG=enumerate_chain.exe
   GEN_PROG=crackalack_gen.exe
@@ -19,7 +19,7 @@ ifneq ($(WINDOWS_BUILD),)
   UNITTEST_PROG=crackalack_unit_tests.exe
   VERIFY_PROG=crackalack_verify.exe
 else
-  LINK_OPTIONS += -ldl -lgcrypt
+  LINK_OPTIONS += -ldl
 
   ENUMERATE_PROG=enumerate_chain
   GEN_PROG=crackalack_gen
@@ -90,5 +90,5 @@ tests:	$(UNITTEST_PROG) $(LOOKUP_PROG) $(GEN_PROG)
 .PHONY: linux
 linux: CC = gcc
 linux: COMPILE_OPTIONS = -Wall -g -O3
-linux: LINK_OPTIONS = -lpthread -ldl
+linux: LINK_OPTIONS = -lpthread -ldl -lgcrypt
 linux: all

@@ -53,7 +53,7 @@ However, other modern equipment can work just fine, so you don't necessarily nee
 
 A 64-bit Windows build can be achieved on an Ubuntu host machine by installing the following prerequisites:
 
-    # apt install mingw-w64 opencl-headers
+    # apt install mingw-w64 opencl-headers libgcrypt-mingw-w64-dev
 
 Then starting the build with:
 
@@ -62,6 +62,16 @@ Then starting the build with:
 However, if you prefer to build a complete package (which is useful for testing on other Windows machines), run:
 
     # ./scripts/build_windows_zip.sh
+
+## Linux Build
+
+A 64-bit build can be achieved on an Ubuntu host machine by installing the following prerequisites:
+
+    # apt install opencl-c-headers libgcrypt20-dev
+
+Then starting the build with:
+
+    # make clean; make linux
 
 ## Change Log
 ### v1.3 (February 26, 2021)
