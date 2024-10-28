@@ -1,6 +1,7 @@
-.PHONY:	archive clean tests test all
+.PHONY: archive clean tests test all linux
 
 CC=gcc
+CL_INCLUDE=/usr/include/CL
 COMPILE_OPTIONS=-Wall -g -O3
 LINK_OPTIONS=-lpthread
 
@@ -33,6 +34,10 @@ endif
 ifneq ($(TRAVIS_BUILD),)
   COMPILE_OPTIONS += -D TRAVIS_BUILD=1
 endif
+
+# Add the OpenCL library when building for Linux
+linux: LINK_OPTIONS += -lOpenCL
+linux: all
 
 
 all:	$(GEN_PROG) $(UNITTEST_PROG) $(LOOKUP_PROG) $(RTC2RT_PROG) $(GETCHAIN_PROG) $(VERIFY_PROG) $(PERFECTIFY_PROG) $(ENUMERATE_PROG)
@@ -81,3 +86,9 @@ tests:	$(UNITTEST_PROG) $(LOOKUP_PROG) $(GEN_PROG)
 	python3 crackalack_tests.py
 
 .PHONY:	test tests clean archive
+
+.PHONY: linux
+linux: CC = gcc
+linux: COMPILE_OPTIONS = -Wall -g -O3
+linux: LINK_OPTIONS = -lpthread -ldl
+linux: all
