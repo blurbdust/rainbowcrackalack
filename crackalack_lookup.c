@@ -422,28 +422,21 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
       	    continue;
       	  }
       	} else if (args[i].hash_type == HASH_NETNTLMV1) {
-          
-          setup_des_key(plaintext, real_key);
 
           unsigned char hash[8] = {0};
           char hash_hex[(sizeof(hash) * 2) + 1] = {0};
           char rkey_hex[(sizeof(hash) * 2) + 1] = {0};
 
-          
-
+          setup_des_key(plaintext, real_key);
 
           netntlmv1_hash(real_key, 8, hash);
-          //int ret = 0;
-          //ret = bytes_to_hex(real_key, sizeof(real_key), rkey_hex, sizeof(rkey_hex));
-          //printf("ret: %d, hash_hex: %s\n", ret, rkey_hex);
-          
+
           if (!bytes_to_hex(hash, sizeof(hash), hash_hex, sizeof(hash_hex)) || \
               (strcmp(hash_hex, ppi_refs[j]->hash) != 0)) {
+                bytes_to_hex(real_key, sizeof(real_key), rkey_hex, sizeof(rkey_hex));
                 printf("Found super false positive!: Net-NTLMv1('%s') != %s\n", rkey_hex, ppi_refs[j]->hash);
             continue;
           }
-          
-          
         } else {
       	  printf("WARNING: CPU code to double-check this cracked hash has not yet been added.  There is a 60%% chance this is a false positive!  A workaround is to use John The Ripper to validate this result(s).\n");
         }
@@ -459,14 +452,13 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
 
       	save_cracked_hash(ppi_refs[j], args[i].hash_type);
         if (args[i].hash_type == HASH_NETNTLMV1) {
-          printf("%sHASH CRACKED => %s:", GREENB, ppi_refs[j]->hash);
-          for (int n = 0; n < 8; n++) {
-            printf("%s%02x", GREENB, real_key[n]);
-          }
-          printf("%s\n", CLR);
+          char ptxt_hex[(sizeof(plaintext) * 2) + 1] = {0};
+          bytes_to_hex((unsigned char*)plaintext, 7, ptxt_hex, sizeof(ptxt_hex));
+
+          printf("%sHASH CRACKED => %s:1122334455667788:%s%s\n", GREENB, ppi_refs[j]->hash, ptxt_hex, CLR);
           fflush(stdout);
         } else {
-          printf("%sHASH CRACKED => %s:%s%s\n", GREENB, (ppi_refs[j]->username != NULL) ? ppi_refs[j]->username : ppi_refs[j]->hash, plaintext, CLR);  fflush(stdout);
+          printf("%sHASH CRACKED => %s:1122334455667788:%s%s\n", GREENB, (ppi_refs[j]->username != NULL) ? ppi_refs[j]->username : ppi_refs[j]->hash, plaintext, CLR);  fflush(stdout);
         }
       }
     }
@@ -2276,8 +2268,17 @@ int main(int ac, char **av) {
     printf(" Results\n -------\n%s", GREENB);
     ppi_cur = ppi_head;
     while(ppi_cur != NULL) {
-      if (ppi_cur->plaintext != NULL)
-	printf(" %s  %s\n", (ppi_cur->username != NULL) ? ppi_cur->username : ppi_cur->hash, ppi_cur->plaintext);
+      if (ppi_cur->plaintext != NULL) {
+        if (sizeof(ppi_cur->hash) == 8) {
+          char ptxt_hex[(sizeof(ppi_cur->plaintext) * 2) + 1] = {0};
+          bytes_to_hex((unsigned char*)ppi_cur->plaintext, 7, ptxt_hex, sizeof(ptxt_hex));
+	  printf(" %s  %s\n", (ppi_cur->username != NULL) ? ppi_cur->username : ppi_cur->hash, ptxt_hex);
+
+        }
+        else {
+	  printf(" %s  %s\n", (ppi_cur->username != NULL) ? ppi_cur->username : ppi_cur->hash, ppi_cur->plaintext);
+        }
+      }
 
       ppi_cur = ppi_cur->next;
     }

@@ -275,7 +275,7 @@ void md4_encrypt(unsigned int *hash, unsigned int *W)
 void setup_des_key(char key_56[], unsigned char *key)
 {
   //char key[8]= {0};
-
+/*
   key[0] = key_56[0];
   key[1] = (key_56[0] << 7) | (key_56[1] >> 1);
   key[2] = (key_56[1] << 6) | (key_56[2] >> 2);
@@ -284,6 +284,15 @@ void setup_des_key(char key_56[], unsigned char *key)
   key[5] = (key_56[4] << 3) | (key_56[5] >> 5);
   key[6] = (key_56[5] << 2) | (key_56[6] >> 6);
   key[7] = (key_56[6] << 1);
+*/
+  key[0] = (((key_56[0] >> 1) & 0x7f) << 1);
+  key[1] = (((key_56[0] & 0x01) << 6 | ((key_56[1] >> 2) & 0x3f)) << 1);
+  key[2] = (((key_56[1] & 0x03) << 5 | ((key_56[2] >> 3) & 0x1f)) << 1);
+  key[3] = (((key_56[2] & 0x07) << 4 | ((key_56[3] >> 4) & 0x0f)) << 1);
+  key[4] = (((key_56[3] & 0x0f) << 3 | ((key_56[4] >> 5) & 0x07)) << 1);
+  key[5] = (((key_56[4] & 0x1f) << 2 | ((key_56[5] >> 6) & 0x03)) << 1);
+  key[6] = (((key_56[5] & 0x3f) << 1 | ((key_56[6] >> 7) & 0x01)) << 1);
+  key[7] = ((key_56[6] & 0x7f) << 1);
 }
 
 /*
