@@ -432,9 +432,9 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
           netntlmv1_hash(real_key, 8, hash);
 
           if (!bytes_to_hex(hash, sizeof(hash), hash_hex, sizeof(hash_hex)) || \
-              (strcmp(hash_hex, ppi_refs[j]->hash) != 0)) {
+              (strncmp(hash_hex, ppi_refs[j]->hash, 16) != 0)) {
                 bytes_to_hex(real_key, sizeof(real_key), rkey_hex, sizeof(rkey_hex));
-                printf("Found super false positive!: Net-NTLMv1('%s') != %s\n", rkey_hex, ppi_refs[j]->hash);
+                printf("Found super false positive!: (Net-NTLMv1('%s') == %s) != %s\n", rkey_hex, hash_hex, ppi_refs[j]->hash);
             continue;
           }
         } else {

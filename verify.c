@@ -71,17 +71,17 @@ int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, unsigne
   } else if (table_type == VERIFY_TABLE_TYPE_LOOKUP) {
     uint64_t last_end = 0;
 
-
     /* For tables ready to be used for lookups (i.e.: sorted tables), the end indices must be sorted in ascending order. */
     for (i = 0; i < num_chains; i++) {
       start = rainbowtable[i * 2];
       end = rainbowtable[(i * 2) + 1];
 
+/* this is a valid condition if checking 0x00 00 00 00 00 00 00 00
       if (end == 0) {
 	fprintf(stderr, "Error: end index for chain #%u is zero.\n", i);
 	return 0;
       }
-
+*/
       if (end < last_end) {
 	fprintf(stderr, "Error: table end indices are not sorted.  Current end index (at chain #%u) is not greater or equal to last end index.\n\n\tCurrent end index: %"PRIu64"\n\tLast end index:    %"PRIu64"\n\n", i, end, last_end);
 	return 0;
