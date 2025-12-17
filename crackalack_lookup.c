@@ -543,7 +543,7 @@ unsigned int count_tables(char *dir) {
 #else
     /* Linux has the d_type field, which is much more efficient to use than doing
      * another stat(). */
-    is_file = (de->d_type == DT_REG);
+    is_file = (de->d_type == DT_REG) || (de->d_type == DT_LNK);
     is_dir = (de->d_type == DT_DIR);
 #endif
 
