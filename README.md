@@ -57,11 +57,11 @@ A 64-bit Windows build can be achieved on an Ubuntu host machine by installing t
 
 Then starting the build with:
 
-    # make clean; ./make_windows.sh
+    # make clean; make windows
 
 However, if you prefer to build a complete package (which is useful for testing on other Windows machines), run:
 
-    # ./scripts/build_windows_zip.sh
+    # 7z a windows-build.7z *.exe *.dll CL shared.h
 
 ## Linux Build
 
