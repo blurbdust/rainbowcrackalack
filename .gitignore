@@ -1,6 +1,7 @@
 *~
 *.o
 *.exe
+*.dll
 *.zip
 *.pyc
 *.sig

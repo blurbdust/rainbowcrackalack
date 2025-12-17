@@ -1,94 +1,217 @@
-.PHONY: archive clean tests test all linux
+BUILD ?= linux
+BUILD_DIR := build/$(BUILD)
+OBJDIR := $(BUILD_DIR)/obj
+INCDIR := $(BUILD_DIR)/include
 
-CC=gcc
-CL_INCLUDE=/usr/include/CL
-COMPILE_OPTIONS=-Wall -g -O3
-LINK_OPTIONS=-lpthread -lgcrypt
+OUTDIR := .
 
-# If we're doing a Windows build...
-ifneq ($(WINDOWS_BUILD),)
-  COMPILE_OPTIONS += -I$(CL_INCLUDE)
-  LINK_OPTIONS += -static -lbcrypt -lgpg-error -lws2_32
+CC_linux   := gcc
+CC_windows := x86_64-w64-mingw32-gcc
+STRIP_windows := x86_64-w64-mingw32-strip
 
-  ENUMERATE_PROG=enumerate_chain.exe
-  GEN_PROG=crackalack_gen.exe
-  GETCHAIN_PROG=get_chain.exe
-  LOOKUP_PROG=crackalack_lookup.exe
-  #PERFECTIFY_PROG=perfectify.exe
-  RTC2RT_PROG=crackalack_rtc2rt.exe
-  UNITTEST_PROG=crackalack_unit_tests.exe
-  VERIFY_PROG=crackalack_verify.exe
-else
-  LINK_OPTIONS += -ldl
+TARGET_TRIPLE_windows := x86_64-w64-mingw32
+SYSROOT_windows := /usr/$(TARGET_TRIPLE_windows)
+OBJDUMP_windows := $(TARGET_TRIPLE_windows)-objdump
 
-  ENUMERATE_PROG=enumerate_chain
-  GEN_PROG=crackalack_gen
-  GETCHAIN_PROG=get_chain
-  LOOKUP_PROG=crackalack_lookup
-  PERFECTIFY_PROG=perfectify
-  RTC2RT_PROG=crackalack_rtc2rt
-  UNITTEST_PROG=crackalack_unit_tests
-  VERIFY_PROG=crackalack_verify
+CFLAGS_common   := -Wall -O3 -g
+CPPFLAGS_common :=
+LDFLAGS_common  :=
+
+EXE :=
+LIBS :=
+PREP := prep_none
+
+ifeq ($(BUILD),linux)
+  CC := $(CC_linux)
+  EXE :=
+  CPPFLAGS := $(CPPFLAGS_common)
+  CFLAGS   := $(CFLAGS_common)
+  LDFLAGS  := $(LDFLAGS_common)
+  LIBS     := -lpthread -ldl -lgcrypt -lOpenCL
 endif
 
-ifneq ($(TRAVIS_BUILD),)
-  COMPILE_OPTIONS += -D TRAVIS_BUILD=1
+ifeq ($(BUILD),windows)
+  CC := $(CC_windows)
+  EXE := .exe
+
+  CPPFLAGS := $(CPPFLAGS_common) -I$(INCDIR)
+  CFLAGS   := $(CFLAGS_common)
+  LDFLAGS  := $(LDFLAGS_common)
+
+  LIBS := -lwinpthread -lgcrypt -lgpg-error -lbcrypt -lws2_32
+
+  PREP := prep_opencl_headers
 endif
 
-# Add the OpenCL library when building for Linux
-linux: LINK_OPTIONS += -lOpenCL
-linux: all
+SRCS := $(wildcard *.c)
+OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS))
 
+GEN_PROG      := crackalack_gen$(EXE)
+UNITTEST_PROG := crackalack_unit_tests$(EXE)
+GETCHAIN_PROG := get_chain$(EXE)
+VERIFY_PROG   := crackalack_verify$(EXE)
+RTC2RT_PROG   := crackalack_rtc2rt$(EXE)
+LOOKUP_PROG   := crackalack_lookup$(EXE)
+PERFECTIFY    := perfectify$(EXE)
+ENUMERATE     := enumerate_chain$(EXE)
 
-all:	$(GEN_PROG) $(UNITTEST_PROG) $(LOOKUP_PROG) $(RTC2RT_PROG) $(GETCHAIN_PROG) $(VERIFY_PROG) $(PERFECTIFY_PROG) $(ENUMERATE_PROG)
+BINARIES := \
+	$(OUTDIR)/$(GEN_PROG) \
+	$(OUTDIR)/$(UNITTEST_PROG) \
+	$(OUTDIR)/$(GETCHAIN_PROG) \
+	$(OUTDIR)/$(VERIFY_PROG) \
+	$(OUTDIR)/$(RTC2RT_PROG) \
+	$(OUTDIR)/$(LOOKUP_PROG) \
+	$(OUTDIR)/$(PERFECTIFY) \
+	$(OUTDIR)/$(ENUMERATE)
 
+.PHONY: all linux windows clean strip \
+        prep_opencl_headers prep_none \
+        bundle_windows
 
-%.o: %.c
-	$(CC) $(COMPILE_OPTIONS) -o $@ -c $<
+all: $(PREP) $(BINARIES)
 
-$(GEN_PROG):	charset.o clock.o cpu_rt_functions.o crackalack_gen.o file_lock.o gws.o hash_validate.o misc.o opencl_setup.o rtc_decompress.o verify.o
-	$(CC) $(COMPILE_OPTIONS) -o $(GEN_PROG) charset.o clock.o cpu_rt_functions.o crackalack_gen.o file_lock.o gws.o hash_validate.o misc.o opencl_setup.o rtc_decompress.o verify.o $(LINK_OPTIONS)
+linux:
+	$(MAKE) BUILD=linux all
 
-$(UNITTEST_PROG):	charset.o cpu_rt_functions.o crackalack_unit_tests.o hash_validate.o misc.o opencl_setup.o  test_chain.o test_chain_ntlm9.o test_hash.o test_hash_ntlm9.o test_hash_to_index.o test_hash_to_index_ntlm9.o test_index_to_plaintext.o test_index_to_plaintext_ntlm9.o test_shared.o file_lock.o
-	$(CC) $(COMPILE_OPTIONS) -o $(UNITTEST_PROG) charset.o cpu_rt_functions.o crackalack_unit_tests.o hash_validate.o misc.o opencl_setup.o test_chain.o test_chain_ntlm9.o test_hash.o test_hash_ntlm9.o test_hash_to_index.o test_hash_to_index_ntlm9.o test_index_to_plaintext.o test_index_to_plaintext_ntlm9.o test_shared.o file_lock.o $(LINK_OPTIONS)
+windows:
+	$(MAKE) BUILD=windows all bundle_windows
 
-$(GETCHAIN_PROG):	get_chain.o
-	$(CC) $(COMPILE_OPTIONS) -o $(GETCHAIN_PROG) get_chain.o $(LINK_OPTIONS)
+strip: windows
+	$(STRIP_windows) $(OUTDIR)/*.exe || true
 
-$(VERIFY_PROG):	charset.o cpu_rt_functions.o crackalack_verify.o file_lock.o hash_validate.o misc.o rtc_decompress.o verify.o
-	$(CC) $(COMPILE_OPTIONS) -o $(VERIFY_PROG) charset.o cpu_rt_functions.o crackalack_verify.o file_lock.o hash_validate.o misc.o rtc_decompress.o verify.o $(LINK_OPTIONS)
+$(OBJDIR) $(INCDIR):
+	mkdir -p $@
 
-$(RTC2RT_PROG):	rtc_decompress.o crackalack_rtc2rt.o
-	$(CC) $(COMPILE_OPTIONS) -o $(RTC2RT_PROG) crackalack_rtc2rt.o rtc_decompress.o $(LINK_OPTIONS)
+prep_none:
+	@true
 
-$(LOOKUP_PROG): clock.o cpu_rt_functions.o charset.o file_lock.o hash_validate.o crackalack_lookup.o misc.o opencl_setup.o rtc_decompress.o test_shared.o verify.o
-	$(CC) $(COMPILE_OPTIONS) -o $(LOOKUP_PROG) charset.o clock.o cpu_rt_functions.o crackalack_lookup.o file_lock.o hash_validate.o misc.o opencl_setup.o rtc_decompress.o test_shared.o verify.o $(LINK_OPTIONS)
+prep_opencl_headers: | $(INCDIR)
+	@if [ ! -d /usr/include/CL ]; then \
+		echo "ERROR: /usr/include/CL not found. Install OpenCL headers (e.g. opencl-headers)."; \
+		exit 1; \
+	fi
+	@mkdir -p $(INCDIR)/CL
+	@cp -a /usr/include/CL/* $(INCDIR)/CL/
 
-$(PERFECTIFY_PROG):	clock.o perfectify.o
-	$(CC) $(COMPILE_OPTIONS) -o $(PERFECTIFY_PROG) clock.o perfectify.o
+DEPFLAGS = -MMD -MP
+DEPS := $(OBJS:.o=.d)
 
-$(ENUMERATE_PROG):	cpu_rt_functions.o enumerate_chain.o test_shared.o
-	$(CC) $(COMPILE_OPTIONS) -o $(ENUMERATE_PROG) cpu_rt_functions.o enumerate_chain.o test_shared.o $(LINK_OPTIONS)
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
+-include $(DEPS)
+
+$(OUTDIR)/$(GEN_PROG): \
+	$(OBJDIR)/charset.o \
+	$(OBJDIR)/clock.o \
+	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/crackalack_gen.o \
+	$(OBJDIR)/file_lock.o \
+	$(OBJDIR)/gws.o \
+	$(OBJDIR)/hash_validate.o \
+	$(OBJDIR)/misc.o \
+	$(OBJDIR)/opencl_setup.o \
+	$(OBJDIR)/rtc_decompress.o \
+	$(OBJDIR)/verify.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(UNITTEST_PROG): \
+	$(OBJDIR)/charset.o \
+	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/crackalack_unit_tests.o \
+	$(OBJDIR)/hash_validate.o \
+	$(OBJDIR)/misc.o \
+	$(OBJDIR)/opencl_setup.o \
+	$(OBJDIR)/test_chain.o \
+	$(OBJDIR)/test_chain_ntlm9.o \
+	$(OBJDIR)/test_hash.o \
+	$(OBJDIR)/test_hash_ntlm9.o \
+	$(OBJDIR)/test_hash_to_index.o \
+	$(OBJDIR)/test_hash_to_index_ntlm9.o \
+	$(OBJDIR)/test_index_to_plaintext.o \
+	$(OBJDIR)/test_index_to_plaintext_ntlm9.o \
+	$(OBJDIR)/test_shared.o \
+	$(OBJDIR)/file_lock.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(GETCHAIN_PROG): $(OBJDIR)/get_chain.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(VERIFY_PROG): \
+	$(OBJDIR)/charset.o \
+	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/crackalack_verify.o \
+	$(OBJDIR)/file_lock.o \
+	$(OBJDIR)/hash_validate.o \
+	$(OBJDIR)/misc.o \
+	$(OBJDIR)/rtc_decompress.o \
+	$(OBJDIR)/verify.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(RTC2RT_PROG): \
+	$(OBJDIR)/rtc_decompress.o \
+	$(OBJDIR)/crackalack_rtc2rt.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(LOOKUP_PROG): \
+	$(OBJDIR)/charset.o \
+	$(OBJDIR)/clock.o \
+	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/crackalack_lookup.o \
+	$(OBJDIR)/file_lock.o \
+	$(OBJDIR)/hash_validate.o \
+	$(OBJDIR)/misc.o \
+	$(OBJDIR)/opencl_setup.o \
+	$(OBJDIR)/rtc_decompress.o \
+	$(OBJDIR)/test_shared.o \
+	$(OBJDIR)/verify.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(PERFECTIFY): \
+	$(OBJDIR)/clock.o \
+	$(OBJDIR)/perfectify.o
+	$(CC) $(LDFLAGS) $^ -o $@
+
+$(OUTDIR)/$(ENUMERATE): \
+	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/enumerate_chain.o \
+	$(OBJDIR)/test_shared.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+bundle_windows:
+	@echo "Bundling runtime DLLs into $(OUTDIR)..."
+	@set -e; \
+	cp -u "$(SYSROOT_windows)/bin/libgcrypt-20.dll" "$(OUTDIR)/" 2>/dev/null || true; \
+	cp -u "$(SYSROOT_windows)/bin/libgpg-error-0.dll" "$(OUTDIR)/" 2>/dev/null || true; \
+	cp -u "$(SYSROOT_windows)/lib/libwinpthread-1.dll" "$(OUTDIR)/" 2>/dev/null || true; \
+	for exe in $(OUTDIR)/*.exe; do \
+		[ -f "$$exe" ] || continue; \
+		echo "  -> $$exe"; \
+		"$(OBJDUMP_windows)" -p "$$exe" | awk '/DLL Name:/ {print $$3}' | while read dll; do \
+			case "$$dll" in \
+				KERNEL32.dll|USER32.dll|ADVAPI32.dll|WS2_32.dll|bcrypt.dll|GDI32.dll|SHELL32.dll|OLE32.dll|OLEAUT32.dll|CRYPT32.dll|ntdll.dll) \
+					;; \
+				*) \
+					found=""; \
+					for cand in \
+						"$(SYSROOT_windows)/bin/$$dll" \
+						"$(SYSROOT_windows)/lib/$$dll"; \
+					do \
+						if [ -f "$$cand" ]; then cp -u "$$cand" "$(OUTDIR)/"; found=1; break; fi; \
+					done; \
+					if [ -z "$$found" ]; then \
+						src="$$(find "$(SYSROOT_windows)" -type f -iname "$$dll" 2>/dev/null | head -n 1)"; \
+						if [ -n "$$src" ]; then cp -u "$$src" "$(OUTDIR)/"; \
+						else echo "WARNING: could not locate $$dll on build machine"; fi; \
+					fi; \
+					;; \
+			esac; \
+		done; \
+	done
 
 clean:
-	rm -f *~ *.o *.exe *.zip *.sig crackalack_gen crackalack_unit_tests get_chain crackalack_verify crackalack_rtc2rt crackalack_lookup perfectify enumerate_chain
-
-archive: clean
-	./scripts/archive.sh
-
-test:	$(UNITTEST_PROG) $(LOOKUP_PROG) $(GEN_PROG)
-	./crackalack_unit_tests
-	python3 crackalack_tests.py
-
-tests:	$(UNITTEST_PROG) $(LOOKUP_PROG) $(GEN_PROG)
-	./crackalack_unit_tests
-	python3 crackalack_tests.py
-
-.PHONY:	test tests clean archive
-
-.PHONY: linux
-linux: CC = gcc
-linux: COMPILE_OPTIONS = -Wall -g -O3
-linux: LINK_OPTIONS = -lpthread -ldl -lgcrypt
-linux: all
+	rm -rf build
+	rm -f *.exe \
+	      crackalack_gen crackalack_unit_tests get_chain crackalack_verify crackalack_rtc2rt crackalack_lookup perfectify enumerate_chain \
+	      libgcrypt-20.dll libgpg-error-0.dll libwinpthread-1.dll
