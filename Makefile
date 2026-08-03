@@ -76,6 +76,7 @@ UNITTEST_PROG := crackalack_unit_tests$(EXE)
 GETCHAIN_PROG := get_chain$(EXE)
 VERIFY_PROG   := crackalack_verify$(EXE)
 RTC2RT_PROG   := crackalack_rtc2rt$(EXE)
+RT2RTC_PROG   := crackalack_rt2rtc$(EXE)
 LOOKUP_PROG   := crackalack_lookup$(EXE)
 PERFECTIFY    := perfectify$(EXE)
 ENUMERATE     := enumerate_chain$(EXE)
@@ -86,6 +87,7 @@ BINARIES := \
 	$(OUTDIR)/$(GETCHAIN_PROG) \
 	$(OUTDIR)/$(VERIFY_PROG) \
 	$(OUTDIR)/$(RTC2RT_PROG) \
+	$(OUTDIR)/$(RT2RTC_PROG) \
 	$(OUTDIR)/$(LOOKUP_PROG) \
 	$(OUTDIR)/$(PERFECTIFY) \
 	$(OUTDIR)/$(ENUMERATE)
@@ -177,6 +179,11 @@ $(OUTDIR)/$(VERIFY_PROG): \
 $(OUTDIR)/$(RTC2RT_PROG): \
 	$(OBJDIR)/rtc_decompress.o \
 	$(OBJDIR)/crackalack_rtc2rt.o
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+$(OUTDIR)/$(RT2RTC_PROG): \
+	$(OBJDIR)/rtc_compress.o \
+	$(OBJDIR)/crackalack_rt2rtc.o
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 
 $(OUTDIR)/$(LOOKUP_PROG): \
