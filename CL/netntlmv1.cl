@@ -1,3 +1,10 @@
+/* 'generic' is an OpenCL 2.0 address space qualifier.  On OpenCL 1.2 devices
+   (for example Apple's) the default private address space is what these
+   helpers want, so define it away. */
+#if !defined(__OPENCL_C_VERSION__) || (__OPENCL_C_VERSION__ < 200)
+#define generic
+#endif
+
 /*
 #ifdef IS_NV
 #define KXX_DECL
