@@ -2,9 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ '**' ]
   pull_request:
   workflow_dispatch:
+
+# Same-repo pull requests fire both push and pull_request, and pushing again
+# supersedes a run in flight.  Keep one run per ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
