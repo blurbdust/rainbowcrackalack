@@ -254,6 +254,12 @@ void *host_thread(void *ptr) {
   queue = gpu->queue;
   kernel = gpu->kernel;
 
+#ifdef USE_CUDA
+  /* CUDA has no clGetKernelWorkGroupInfo; use the fixed block-size / warp
+   * values that cuda_setup.c's launcher assumes (block 256, warp 32). */
+  kernel_work_group_size = 256;
+  kernel_preferred_work_group_size_multiple = 32;
+#else
   if ((rc_clGetKernelWorkGroupInfo(kernel, gpu->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &kernel_work_group_size, NULL) != CL_SUCCESS) || \
       (rc_clGetKernelWorkGroupInfo(kernel, gpu->device, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeof(size_t), &kernel_preferred_work_group_size_multiple, NULL) != CL_SUCCESS)) {
     fprintf(stderr, "Failed to get preferred work group size!\n");
@@ -264,6 +270,7 @@ void *host_thread(void *ptr) {
     pthread_exit(NULL);
     return NULL;
   }
+#endif
 
   /* If the user provided a static GWS on the command line, use that.   Otherwise,
    * use the driver's work group size multiplied by the preferred multiple. */
