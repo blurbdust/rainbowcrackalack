@@ -156,6 +156,16 @@ void get_platform_str(cl_platform_id platform, cl_platform_info param, char *buf
 }
 
 
+#ifdef __APPLE__
+/* Apple ships OpenCL 1.2, which has no clCreateCommandQueueWithProperties.
+   Adapt the 1.2 clCreateCommandQueue to the 2.0 signature. */
+static cl_command_queue (*rc_clCreateCommandQueue_apple)(cl_context, cl_device_id, cl_command_queue_properties, cl_int *) = NULL;
+static cl_command_queue apple_create_queue(cl_context ctx, cl_device_id dev, const cl_queue_properties *props, cl_int *errcode) {
+  (void)props;
+  return rc_clCreateCommandQueue_apple(ctx, dev, 0, errcode);
+}
+#endif
+
 /* Returns the array of platforms and devices. */
 void get_platforms_and_devices(int disable_platform, cl_uint platforms_buffer_size, cl_platform_id *platforms, cl_uint *num_platforms, cl_uint devices_buffer_size, cl_device_id *devices, cl_uint *num_devices, unsigned int verbose) {
   unsigned int i = 0;
@@ -170,6 +180,8 @@ void get_platforms_and_devices(int disable_platform, cl_uint platforms_buffer_si
   if (opencl_initialized == 0) {
 #ifdef _WIN32
     ocl = rc_dlopen("OpenCL"); /* Windows */
+#elif defined(__APPLE__)
+    ocl = rc_dlopen("/System/Library/Frameworks/OpenCL.framework/OpenCL"); /* macOS */
 #else
     ocl = rc_dlopen("libOpenCL.so"); /* Linux */
     if (ocl == NULL) /* See if the Intel OpenCL driver is available... */
@@ -183,7 +195,16 @@ void get_platforms_and_devices(int disable_platform, cl_uint platforms_buffer_si
 
     LOADFUNC(ocl, clBuildProgram);
     LOADFUNC(ocl, clCreateBuffer);
+#ifdef __APPLE__
+    rc_clCreateCommandQueue_apple = rc_dlsym(ocl, "clCreateCommandQueue");
+    if (rc_clCreateCommandQueue_apple == NULL) {
+      fprintf(stderr, "Error while loading clCreateCommandQueue: %s\n", rc_dlerror());
+      exit(-1);
+    }
+    rc_clCreateCommandQueueWithProperties = apple_create_queue;
+#else
     LOADFUNC(ocl, clCreateCommandQueueWithProperties);
+#endif
     LOADFUNC(ocl, clCreateContext);
     LOADFUNC(ocl, clCreateKernel);
     LOADFUNC(ocl, clCreateProgramWithSource);
