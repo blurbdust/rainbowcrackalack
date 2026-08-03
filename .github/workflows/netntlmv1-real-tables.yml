@@ -1,0 +1,204 @@
+name: Net-NTLMv1 real table lookup
+
+# End-to-end check against real published tables, using the capture from
+# Mandiant's Net-NTLMv1 deprecation writeup as ground truth:
+#
+#   LABDC19$::TESTLAB:59b8beffd0c2aec5a9d83c6ca210be62cec31640e20cbfca:...:1122334455667788
+#     CT1 59b8beffd0c2aec5 -> 9e969e23a39134   (found in table part 2289)
+#     CT2 a9d83c6ca210be62 -> 884488e0247650   (found in table part 389)
+#     CT3 cec31640e20cbfca -> fffc          (brute-forced, not a table lookup)
+#   NTLM hash: 9e969e23a39134884488e0247650fffc
+#
+# Both lookups have been run for real and confirmed against these two tables.
+# With the precompute cache seeded, the whole two-table pass took 18 seconds of
+# compute (1.3s table I/O, 0.4s binary search, 17.6s over 2,239 false alarms
+# across 268,435,336 chains).  Seeding those two ciphertexts took 50 minutes on
+# the same GPU, which is exactly the cost this workflow avoids paying per run.
+#
+# Precomputation costs about chain_len^2 / 2 hash operations per ciphertext.
+# At chain_len 881689 that is roughly 3.9e11 DES operations, about 18 minutes on
+# a GPU and tens of hours on a CPU.  Everything after it (table I/O, binary
+# search, false alarm checks) is cheap by comparison.
+#
+# So there are two ways to run this:
+#
+#   1. cpu_opencl = true (default).  Supply precalc_url pointing at a tarball
+#      built by tests/seed_precalc.py on a machine with a GPU.  The precompute
+#      cache is keyed on charset, plaintext lengths, table index, chain length
+#      and the ciphertext, but NOT on the table part or chain count, so one
+#      seeding run is valid for every part of the table set.  This runs fine on
+#      a GitHub-hosted runner with pocl.
+#
+#   2. cpu_opencl = false.  Run on a self-hosted runner with an OpenCL GPU and
+#      let it do the precomputation itself.  No precalc_url needed.
+#
+# Disk: each table is about 2.0 GiB.  GitHub-hosted runners have roughly 14 GiB
+# free, so two tables fit, but do not add many more without freeing space first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label'
+        required: true
+        default: 'ubuntu-24.04'
+      cpu_opencl:
+        description: 'Use CPU OpenCL (pocl). Requires precalc_url.'
+        type: boolean
+        default: true
+      precalc_url:
+        description: 'URL of a precalc tarball from tests/seed_precalc.py. Leave empty to use the one committed at tests/precalc_netntlmv1_881689.tar.gz.'
+        required: false
+        default: ''
+      tables:
+        description: 'Whitespace-separated table URLs'
+        required: true
+        default: >-
+          https://tables.blurbdust.pw/netntlmv1-rainbow-tables/tables/netntlmv1_byte%237-7_0_881689x134217668_389.rt
+          https://tables.blurbdust.pw/netntlmv1-rainbow-tables/tables/netntlmv1_byte%237-7_0_881689x134217668_2289.rt
+      expect:
+        description: 'Whitespace-separated <ciphertext>:<expected 7-byte key> pairs'
+        required: true
+        default: '59b8beffd0c2aec5:9e969e23a39134 a9d83c6ca210be62:884488e0247650'
+
+permissions:
+  contents: read
+
+jobs:
+  lookup:
+    name: Look up real Net-NTLMv1 ciphertexts
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      # Workflow inputs are passed through env rather than interpolated into the
+      # script, so their contents cannot be parsed as shell.
+      - name: Check a precompute cache is available
+        if: inputs.cpu_opencl
+        env:
+          PRECALC_URL: ${{ inputs.precalc_url }}
+        run: |
+          set -eu
+          if [ -n "$PRECALC_URL" ]; then
+            echo "Will fetch the precompute cache from precalc_url."
+          elif [ -f tests/precalc_netntlmv1_881689.tar.gz ]; then
+            echo "Will use the committed cache at tests/precalc_netntlmv1_881689.tar.gz."
+          else
+            echo "cpu_opencl is true but no precompute cache is available."
+            echo "Precomputing chain_len 881689 on a CPU would take tens of hours."
+            echo "Either supply a precalc tarball from tests/seed_precalc.py, or"
+            echo "set cpu_opencl to false and use a self-hosted GPU runner."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        env:
+          CPU_OPENCL: ${{ inputs.cpu_opencl }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 clinfo curl \
+            ocl-icd-opencl-dev opencl-headers \
+            libgcrypt20-dev libunrar-dev
+          if [ "$CPU_OPENCL" = "true" ]; then
+            sudo apt-get install -y --no-install-recommends pocl-opencl-icd
+          fi
+
+      - name: Build
+        env:
+          CPU_OPENCL: ${{ inputs.cpu_opencl }}
+        run: |
+          make clean
+          if [ "$CPU_OPENCL" = "true" ]; then
+            make -j"$(nproc)" CPU_OPENCL=1
+          else
+            make -j"$(nproc)"
+          fi
+
+      - name: Show OpenCL devices and free space
+        run: |
+          clinfo --list || true
+          df -h .
+
+      # crackalack_lookup reads its precompute cache from the working directory,
+      # so unpack the tarball at the repo root, where the lookup runs.
+      - name: Seed precompute cache
+        env:
+          PRECALC_URL: ${{ inputs.precalc_url }}
+        run: |
+          set -eu
+          if [ -n "$PRECALC_URL" ]; then
+            curl -fsSL --retry 3 --retry-delay 10 -o precalc.tar.gz "$PRECALC_URL"
+            tar xzf precalc.tar.gz
+          elif [ -f tests/precalc_netntlmv1_881689.tar.gz ]; then
+            tar xzf tests/precalc_netntlmv1_881689.tar.gz
+          else
+            echo "No precompute cache available; this run will precompute from scratch."
+            exit 0
+          fi
+          # The cache only applies if these keys match the tables being searched.
+          for f in rcracki.precalc.*.index; do
+            echo "$f: $(cat "$f")"
+          done
+
+      - name: Download tables
+        env:
+          TABLES: ${{ inputs.tables }}
+        run: |
+          set -eu
+          mkdir -p tables
+          # Unquoted on purpose: the input is a whitespace-separated URL list.
+          for url in $TABLES; do
+            # Percent-decode the filename; the '#' in the table name is encoded
+            # as %23 in the URL but must be literal on disk for the parameter
+            # parser in parse_rt_params() to read it.
+            name="$(basename "${url%%\?*}")"
+            name="$(printf '%b' "${name//%/\\x}")"
+            echo "Fetching $name"
+            curl -fsSL --retry 3 --retry-delay 10 -o "tables/$name" "$url"
+          done
+          ls -la tables/
+          df -h .
+
+      - name: Write hashes file
+        env:
+          EXPECT: ${{ inputs.expect }}
+        run: |
+          set -eu
+          : > hashes.txt
+          for pair in $EXPECT; do
+            echo "${pair%%:*}" >> hashes.txt
+          done
+          cat hashes.txt
+
+      - name: Run lookup
+        run: ./crackalack_lookup tables/ hashes.txt real.pot 2>&1 | tee lookup.log
+
+      - name: Verify recovered keys
+        env:
+          EXPECT: ${{ inputs.expect }}
+        run: |
+          set -eu
+          status=0
+          for pair in $EXPECT; do
+            ct="${pair%%:*}"
+            key="${pair##*:}"
+            if grep -qi "$ct:1122334455667788:$key" lookup.log; then
+              echo "OK       $ct -> $key"
+            else
+              echo "MISMATCH $ct did not resolve to $key"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Upload lookup log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netntlmv1-real-table-lookup-log
+          path: |
+            lookup.log
+            real.pot
+          if-no-files-found: warn

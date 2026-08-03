@@ -17,6 +17,14 @@ CFLAGS_common   := -Wall -O3 -g
 CPPFLAGS_common :=
 LDFLAGS_common  :=
 
+# Set CPU_OPENCL=1 to run the kernels on a CPU OpenCL device (pocl, Intel's CPU
+# runtime, ...) instead of a GPU.  Used by CI, which has no GPU.  This maps to
+# the TRAVIS_BUILD define that opencl_setup.c already honors.  Do not ship
+# binaries built this way; they will ignore GPUs entirely.
+ifeq ($(CPU_OPENCL),1)
+  CPPFLAGS_common += -DTRAVIS_BUILD
+endif
+
 EXE :=
 LIBS :=
 PREP := prep_none
