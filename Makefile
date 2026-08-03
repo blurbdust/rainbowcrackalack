@@ -31,6 +31,8 @@ endif
 # build.  Override either way with UNRAR=0 or UNRAR=1.
 ifeq ($(BUILD),windows)
   UNRAR ?= 0
+else ifeq ($(BUILD),macos)
+  UNRAR ?= 0
 else
   UNRAR ?= 1
 endif
@@ -67,6 +69,19 @@ ifeq ($(BUILD),linux-cuda)
   GPU_BACKEND_OBJ := $(OBJDIR)/cuda_setup.o
 endif
 
+ifeq ($(BUILD),macos)
+  # Metal backend on macOS (Apple Silicon).  Shaders compile at runtime via
+  # metal_setup.m's newLibraryWithSource:, so no standalone metal toolchain is
+  # required.  gcrypt comes from Homebrew (brew install libgcrypt).
+  CC := clang
+  EXE :=
+  CPPFLAGS := $(CPPFLAGS_common) -DUSE_METAL -I/opt/homebrew/include
+  CFLAGS   := $(CFLAGS_common)
+  LDFLAGS  := $(LDFLAGS_common) -L/opt/homebrew/lib
+  LIBS     := -lpthread -lgcrypt -lm -framework Metal -framework Foundation
+  GPU_BACKEND_OBJ := $(OBJDIR)/metal_setup.o
+endif
+
 ifeq ($(BUILD),windows)
   CC := $(CC_windows)
   EXE := .exe
@@ -81,16 +96,21 @@ ifeq ($(BUILD),windows)
   GPU_BACKEND_OBJ := $(OBJDIR)/opencl_setup.o
 endif
 
+GPU_BACKEND_OBJ ?= $(OBJDIR)/opencl_setup.o
+
 # Applied after the per-backend blocks above so every target picks it up.
 ifeq ($(UNRAR),1)
   LIBS += -lunrar
 endif
 
-# Both backend sources exist in the tree; compile only the one for this BUILD.
-# Default (OpenCL) build drops cuda_setup.c; the CUDA build drops opencl_setup.c.
+# Every backend's host source lives in the tree; compile only the one this
+# BUILD selects.  metal_setup.m is Objective-C, so it is never in ALL_SRCS and
+# is pulled in through GPU_BACKEND_OBJ and the %.m rule below.
 ALL_SRCS := $(wildcard *.c)
 ifeq ($(BUILD),linux-cuda)
   SRCS := $(filter-out opencl_setup.c,$(ALL_SRCS))
+else ifeq ($(BUILD),macos)
+  SRCS := $(filter-out opencl_setup.c cuda_setup.c,$(ALL_SRCS))
 else
   SRCS := $(filter-out cuda_setup.c,$(ALL_SRCS))
 endif
@@ -117,7 +137,7 @@ BINARIES := \
 	$(OUTDIR)/$(PERFECTIFY) \
 	$(OUTDIR)/$(ENUMERATE)
 
-.PHONY: all linux linux-cuda windows clean strip \
+.PHONY: all linux linux-cuda macos windows clean strip \
         prep_opencl_headers prep_none \
         bundle_windows
 
@@ -128,6 +148,9 @@ linux:
 
 linux-cuda:
 	$(MAKE) BUILD=linux-cuda all
+
+macos:
+	$(MAKE) BUILD=macos all
 
 windows:
 	$(MAKE) BUILD=windows all bundle_windows
@@ -154,6 +177,11 @@ DEPS := $(OBJS:.o=.d)
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# Objective-C rule for the Metal backend (macos build).  -fobjc-arc is required:
+# metal_setup.m relies on ARC bridging (CFBridgingRetain, __bridge, etc.).
+$(OBJDIR)/%.o: %.m | $(OBJDIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fobjc-arc -c $< -o $@
 
 -include $(DEPS)
 

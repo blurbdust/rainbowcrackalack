@@ -19,6 +19,9 @@
 #include <windows.h>
 /*#include <versionhelpers.h>*/
 #define STATUS_SUCCESS 0
+#elif defined(__APPLE__)
+#include <string.h>
+#include <sys/sysctl.h>
 #else
 #include <string.h>
 #include <sys/sysinfo.h>
@@ -116,6 +119,13 @@ uint64_t get_total_memory() {
     return 0;
   }
   total_memory = ms.ullTotalPhys;
+#elif defined(__APPLE__)
+  int mib[2] = {CTL_HW, HW_MEMSIZE};
+  size_t len = sizeof(total_memory);
+  if (sysctl(mib, 2, &total_memory, &len, NULL, 0) != 0) {
+    fprintf(stderr, "\nFailed to call sysctl(HW_MEMSIZE): %s (%d)\n", strerror(errno), errno);
+    return 0;
+  }
 #else
   struct sysinfo si = {0};
 

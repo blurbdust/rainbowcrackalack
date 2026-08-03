@@ -29,12 +29,12 @@
 #include "version.h"
 
 
-static int raw_table = 0, quick_table = 0, sorted_table = 0, truncate = VERIFY_DONT_TRUNCATE;
+static int raw_table = 0, quick_table = 0, sorted_table = 0, truncate_flag = VERIFY_DONT_TRUNCATE;
 static struct option long_options[] = {
   {"raw", no_argument, &raw_table, 1},
   {"quick", no_argument, &quick_table, 1},
   {"sorted", no_argument, &sorted_table, 1},
-  {"truncate", no_argument, &truncate, VERIFY_TRUNCATE_ON_ERROR},
+  {"truncate", no_argument, &truncate_flag, VERIFY_TRUNCATE_ON_ERROR},
   {"num_chains", required_argument, 0, 'n'},
   {0, 0, 0, 0}
 };
@@ -74,7 +74,7 @@ int main(int ac, char **av) {
   }
 
   /* Sorted tables cannot be truncated. */
-  if (sorted_table && truncate) {
+  if (sorted_table && truncate_flag) {
     fprintf(stderr, "\nError: sorted tables cannot be truncated.\n\n");
     exit(-1);
   }
@@ -94,9 +94,9 @@ int main(int ac, char **av) {
   else if (sorted_table)
     table_type = VERIFY_TABLE_TYPE_LOOKUP;
 
-  if (!verify_rainbowtable_file(filename, table_type, VERIFY_TABLE_IS_COMPLETE, truncate, num_chains_to_verify)) {
+  if (!verify_rainbowtable_file(filename, table_type, VERIFY_TABLE_IS_COMPLETE, truncate_flag, num_chains_to_verify)) {
     fprintf(stderr, "\n%sRainbow table verification FAILED.%s", REDB, CLR);
-    if (truncate == VERIFY_TRUNCATE_ON_ERROR)
+    if (truncate_flag == VERIFY_TRUNCATE_ON_ERROR)
       fprintf(stderr, "  File truncated.");
     fprintf(stderr, "\n\n");
     return -1;

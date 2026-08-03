@@ -23,6 +23,7 @@
 #include <inttypes.h>
 #include <locale.h>
 #include <pthread.h>
+#include "compat.h"  /* pthread_barrier_* shim on macOS (no-op elsewhere) */
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
@@ -254,9 +255,10 @@ void *host_thread(void *ptr) {
   queue = gpu->queue;
   kernel = gpu->kernel;
 
-#ifdef USE_CUDA
-  /* CUDA has no clGetKernelWorkGroupInfo; use the fixed block-size / warp
-   * values that cuda_setup.c's launcher assumes (block 256, warp 32). */
+#if defined(USE_CUDA) || defined(USE_METAL)
+  /* Neither CUDA nor Metal exposes clGetKernelWorkGroupInfo.  Both launchers
+   * assume a 256-thread group with a 32-wide execution unit (a CUDA warp, an
+   * Apple SIMD group). */
   kernel_work_group_size = 256;
   kernel_preferred_work_group_size_multiple = 32;
 #else

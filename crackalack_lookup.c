@@ -21,6 +21,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <unistd.h>
+#define O_BINARY 0
 #else
 #include <sys/sysinfo.h>
 #define O_BINARY 0
@@ -32,6 +35,7 @@
 #include <inttypes.h>
 #include <locale.h>
 #include <pthread.h>
+#include "compat.h"  /* pthread_barrier_* shim on macOS (no-op elsewhere) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -672,6 +676,8 @@ unsigned int get_num_cpu_cores() {
 
   GetSystemInfo(&sysinfo);
   return sysinfo.dwNumberOfProcessors;
+#elif defined(__APPLE__)
+  return (unsigned int)sysconf(_SC_NPROCESSORS_ONLN);
 #else
   return get_nprocs();
 #endif
@@ -749,9 +755,10 @@ void *host_thread_false_alarm(void *ptr) {
   queue = gpu->queue;
   kernel = gpu->kernel;
 
-#ifdef USE_CUDA
-  /* CUDA has no clGetKernelWorkGroupInfo; use the fixed block-size / warp
-   * values that cuda_setup.c's launcher assumes (block 256, warp 32). */
+#if defined(USE_CUDA) || defined(USE_METAL)
+  /* Neither CUDA nor Metal exposes clGetKernelWorkGroupInfo.  Both launchers
+   * assume a 256-thread group with a 32-wide execution unit (a CUDA warp, an
+   * Apple SIMD group). */
   kernel_work_group_size = 256;
   kernel_preferred_work_group_size_multiple = 32;
 #else
@@ -941,8 +948,8 @@ void *host_thread_precompute(void *ptr) {
   queue = gpu->queue;
   kernel = gpu->kernel;
 
-#ifdef USE_CUDA
-  gws = 256;  /* CUDA: fixed block size (see cuda_setup.c launcher). */
+#if defined(USE_CUDA) || defined(USE_METAL)
+  gws = 256;  /* Fixed launch group size for both non-OpenCL backends. */
 #else
   if (rc_clGetKernelWorkGroupInfo(kernel, gpu->device, CL_KERNEL_WORK_GROUP_SIZE /*CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE*/, sizeof(size_t), &gws, NULL) != CL_SUCCESS) {
     fprintf(stderr, "Failed to get preferred work group size!\n");

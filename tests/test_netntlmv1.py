@@ -82,11 +82,28 @@ def fail(msg):
     return False
 
 
+# Kernel sources live in a per-backend directory, and the binaries load them
+# from the working directory at runtime.
+KERNEL_DIRS = ("CL", "CUDA", "Metal")
+
+
 def make_workdir():
-    """crackalack_* load kernels from ./CL, so tests run in a scratch dir."""
+    """Tests run in a scratch dir, so copy whichever kernel trees exist.
+
+    Which one gets used depends on the backend the binaries were built
+    against, so copying all present keeps this suite backend-agnostic.
+    """
     tmp = tempfile.mkdtemp(prefix="netntlmv1_tests")
-    shutil.copytree(os.path.join(REPO_ROOT, "CL"), os.path.join(tmp, "CL"))
-    shutil.copy(os.path.join(REPO_ROOT, "shared.h"), os.path.join(tmp, "CL"))
+    copied = []
+    for name in KERNEL_DIRS:
+        src = os.path.join(REPO_ROOT, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(tmp, name))
+            shutil.copy(os.path.join(REPO_ROOT, "shared.h"), os.path.join(tmp, name))
+            copied.append(name)
+    if not copied:
+        raise RuntimeError("no kernel directory (%s) found under %s"
+                           % (", ".join(KERNEL_DIRS), REPO_ROOT))
     return tmp
 
 
