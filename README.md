@@ -55,7 +55,7 @@ A 64-bit Windows build can be achieved on an Ubuntu host machine by installing t
 
     # apt install mingw-w64 opencl-headers libgcrypt-mingw-w64-dev
 
-For RAR-compressed rainbow table support, libunrar must also be cross-compiled or available as a MinGW package.
+RAR-compressed rainbow table support is disabled on Windows builds, since Ubuntu has no MinGW build of libunrar.  Reading a `.rar` table then reports a clear error; every other feature is unaffected.  If you cross-compile libunrar yourself, enable it with `make windows UNRAR=1`.
 
 Then starting the build with:
 
@@ -71,9 +71,11 @@ A 64-bit build can be achieved on an Ubuntu host machine by installing the follo
 
     # apt install opencl-c-headers libgcrypt20-dev
 
-For RAR-compressed rainbow table support (optional):
+For RAR-compressed rainbow table support (on by default):
 
     # apt install libunrar-dev
+
+To build without it, use `make linux UNRAR=0`.
 
 Then starting the build with:
 

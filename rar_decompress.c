@@ -1,12 +1,19 @@
-#define _UNIX
-#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <inttypes.h>
-#include <unrar/dll.hpp>
 
 #include "rar_decompress.h"
+
+/* RAR-compressed table support needs libunrar (libunrar-dev on Ubuntu).  There
+ * is no mingw package for it, so Windows cross-builds compile without it and
+ * report a clear error if a .rar table is encountered.  The Makefile decides
+ * via UNRAR=0/1; see HAVE_UNRAR there. */
+#ifdef HAVE_UNRAR
+
+#define _UNIX
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unrar/dll.hpp>
 
 #define RAR_INITIAL_CAPACITY (64 * 1024 * 1024)
 
@@ -108,3 +115,17 @@ done:
 
   return ret;
 }
+
+#else /* !HAVE_UNRAR */
+
+/* Built without libunrar.  Fail loudly rather than silently mis-reading the
+ * file; the caller treats any non-zero return as fatal. */
+int rar_decompress(char *filename, uint64_t **ret_uncompressed_table, unsigned int *ret_num_chains) {
+  *ret_uncompressed_table = NULL;
+  *ret_num_chains = 0;
+
+  fprintf(stderr, "Error: this build has no RAR support, so %s cannot be read.\nRebuild with UNRAR=1 (needs libunrar-dev), or decompress the table first.\n", filename);
+  return -1;
+}
+
+#endif /* HAVE_UNRAR */

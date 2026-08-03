@@ -25,6 +25,20 @@ ifeq ($(CPU_OPENCL),1)
   CPPFLAGS_common += -DTRAVIS_BUILD
 endif
 
+# RAR-compressed rainbow table support needs libunrar (libunrar-dev on Ubuntu).
+# Ubuntu ships no mingw build of it, so Windows defaults to off; rar_decompress.c
+# then compiles to a stub that reports a clear error instead of failing the
+# build.  Override either way with UNRAR=0 or UNRAR=1.
+ifeq ($(BUILD),windows)
+  UNRAR ?= 0
+else
+  UNRAR ?= 1
+endif
+
+ifeq ($(UNRAR),1)
+  CPPFLAGS_common += -DHAVE_UNRAR
+endif
+
 EXE :=
 LIBS :=
 PREP := prep_none
@@ -35,7 +49,10 @@ ifeq ($(BUILD),linux)
   CPPFLAGS := $(CPPFLAGS_common)
   CFLAGS   := $(CFLAGS_common)
   LDFLAGS  := $(LDFLAGS_common)
-  LIBS     := -lpthread -ldl -lgcrypt -lOpenCL -lunrar
+  LIBS     := -lpthread -ldl -lgcrypt -lOpenCL
+  ifeq ($(UNRAR),1)
+    LIBS += -lunrar
+  endif
 endif
 
 ifeq ($(BUILD),windows)

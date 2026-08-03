@@ -51,11 +51,6 @@ jobs:
   windows-cross:
     name: Windows cross-build
     runs-on: ubuntu-24.04
-    # Expected to fail until libunrar is available for mingw-w64: rar_decompress.c
-    # includes <unrar/dll.hpp>, which has no mingw package in Ubuntu, so
-    # crackalack_lookup.exe cannot link.  Left non-blocking so it does not gate
-    # pull requests, and so it turns green on its own once that is resolved.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -65,5 +60,25 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential mingw-w64 opencl-headers libgcrypt-mingw-w64-dev
 
+      # Ubuntu has no mingw build of libunrar, so the windows target defaults to
+      # UNRAR=0 and RAR tables report a clear error at runtime.
       - name: Cross-build for Windows
         run: make windows
+
+      # A green build is not enough: the link step used to fail partway through
+      # and leave a subset of the binaries behind.
+      - name: Check every binary was produced
+        run: |
+          set -eu
+          missing=0
+          for exe in crackalack_gen crackalack_lookup crackalack_rtc2rt \
+                     crackalack_unit_tests crackalack_verify enumerate_chain \
+                     get_chain perfectify; do
+            if [ -f "$exe.exe" ]; then
+              echo "  OK      $exe.exe"
+            else
+              echo "  MISSING $exe.exe"
+              missing=1
+            fi
+          done
+          exit $missing
