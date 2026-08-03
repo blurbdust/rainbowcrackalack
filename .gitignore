@@ -11,6 +11,7 @@ rcracki.precalc.*
 crackalack_gen
 crackalack_lookup
 crackalack_rtc2rt
+crackalack_rt2rtc
 crackalack_unit_tests
 crackalack_verify
 get_chain
