@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -83,7 +83,7 @@ int cpu_test_hash_ntlm(char *input, char *expected_output_hex) {
 
 
 /* Creates and tests a hash using the GPU. */
-int gpu_test_hash(cl_device_id device, cl_context context, cl_kernel kernel, char *_input, char *expected_output_hex) {
+int gpu_test_hash(gpu_device device, gpu_context context, gpu_kernel kernel, char *_input, char *expected_output_hex) {
   CLMAKETESTVARS();
   int test_passed = 0;
   int i = 0;
@@ -91,14 +91,14 @@ int gpu_test_hash(cl_device_id device, cl_context context, cl_kernel kernel, cha
   unsigned char expected_output[32] = {0};
   unsigned int expected_output_len = 0;
 
-  cl_mem alg_buffer = NULL, input_buffer = NULL, input_len_buffer = NULL, output_buffer = NULL, output_len_buffer = NULL, debug_buffer = NULL;
+  gpu_buffer alg_buffer = NULL, input_buffer = NULL, input_len_buffer = NULL, output_buffer = NULL, output_len_buffer = NULL, debug_buffer = NULL;
 
   char *input = NULL;
   unsigned char *output = NULL, *debug_ptr = NULL;
   /*unsigned int *debug_ptr = NULL;*/
   
-  cl_uint hash_type = HASH_UNDEFINED;
-  cl_uint input_len = 0, output_len = 0;
+  gpu_uint hash_type = HASH_UNDEFINED;
+  gpu_uint input_len = 0, output_len = 0;
 
 
   queue = CLCREATEQUEUE(context, device);
@@ -124,9 +124,9 @@ int gpu_test_hash(cl_device_id device, cl_context context, cl_kernel kernel, cha
 
   CLCREATEARG(0, alg_buffer, CL_RO, hash_type, sizeof(hash_type));
   CLCREATEARG_ARRAY(1, input_buffer, CL_RO, input, strlen(input) + 1);
-  CLCREATEARG(2, input_len_buffer, CL_RO, input_len, sizeof(cl_uint));
+  CLCREATEARG(2, input_len_buffer, CL_RO, input_len, sizeof(gpu_uint));
   CLCREATEARG_ARRAY(3, output_buffer, CL_WO, output, MAX_HASH_OUTPUT_LEN);
-  CLCREATEARG(4, output_len_buffer, CL_WO, output_len, sizeof(cl_uint));
+  CLCREATEARG(4, output_len_buffer, CL_WO, output_len, sizeof(gpu_uint));
   CLCREATEARG_DEBUG(5, debug_buffer, debug_ptr);
   /*CLCREATEARG_ARRAY(5, debug_buffer, CL_WO, debug_ptr, DEBUG_LEN * sizeof(unsigned int));*/
 
@@ -135,7 +135,7 @@ int gpu_test_hash(cl_device_id device, cl_context context, cl_kernel kernel, cha
   CLWAIT(queue);
 
   CLREADBUFFER(output_buffer, MAX_HASH_OUTPUT_LEN, output);
-  CLREADBUFFER(output_len_buffer, sizeof(cl_uint), &output_len);
+  CLREADBUFFER(output_len_buffer, sizeof(gpu_uint), &output_len);
   CLREADBUFFER(debug_buffer, DEBUG_LEN, debug_ptr);
 
   expected_output_len = hex_to_bytes(expected_output_hex, sizeof(expected_output), expected_output);
@@ -168,7 +168,7 @@ int gpu_test_hash(cl_device_id device, cl_context context, cl_kernel kernel, cha
 }
 
 
-int test_hash(cl_device_id device, cl_context context, cl_kernel kernel, unsigned int hash_type) {
+int test_hash(gpu_device device, gpu_context context, gpu_kernel kernel, unsigned int hash_type) {
   int tests_passed = 1;
   unsigned int i = 0;
 

@@ -28,7 +28,7 @@
 #include <errno.h>
 #include <stdarg.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "charset.h"
 #include "misc.h"

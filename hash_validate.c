@@ -20,7 +20,7 @@
 #include "shared.h"
 
 
-cl_uint hash_str_to_type(char *hash_str) {
+gpu_uint hash_str_to_type(char *hash_str) {
   unsigned int ret = HASH_UNDEFINED;
 
 

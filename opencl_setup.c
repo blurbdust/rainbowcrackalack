@@ -450,3 +450,11 @@ void print_platform_info(cl_platform_id *platforms, cl_uint num_platforms) {
   }
   fflush(stdout);
 }
+
+/* Neutral device-release entry point.  gen.c calls gpu_release_device() so the
+ * same source compiles on OpenCL and CUDA.  On OpenCL this simply wraps
+ * rc_clReleaseDevice; the CUDA backend provides its own (no-op) definition. */
+void gpu_release_device(cl_device_id device) {
+  if (device != NULL)
+    rc_clReleaseDevice(device);
+}

@@ -38,7 +38,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "charset.h"
 #include "clock.h"
@@ -71,10 +71,10 @@
 struct _precomputed_and_potential_indices {
   char *username;  /* Non-NULL if loaded file format is pwdump. */
   char *hash;
-  cl_ulong *precomputed_end_indices;
-  cl_uint num_precomputed_end_indices;
+  gpu_ulong *precomputed_end_indices;
+  gpu_uint num_precomputed_end_indices;
 
-  cl_ulong *potential_start_indices;
+  gpu_ulong *potential_start_indices;
   unsigned int num_potential_start_indices;
   unsigned int potential_start_indices_size;
   unsigned int *potential_start_index_positions; /* Buffer size is always num_potential_start_indices. */
@@ -88,13 +88,13 @@ typedef struct _precomputed_and_potential_indices precomputed_and_potential_indi
 
 /* Struct to represent one GPU device. */
 typedef struct {
-  cl_uint device_number;
-  cl_device_id device;
-  cl_context context;
-  cl_program program;
-  cl_kernel kernel;
-  cl_command_queue queue;
-  cl_uint num_work_units;
+  gpu_uint device_number;
+  gpu_device device;
+  gpu_context context;
+  gpu_program program;
+  gpu_kernel kernel;
+  gpu_queue queue;
+  gpu_uint num_work_units;
 } gpu_dev;
 
 
@@ -116,14 +116,14 @@ typedef struct {
   uint64_t *results;
   unsigned int num_results;
 
-  cl_ulong *potential_start_indices;
+  gpu_ulong *potential_start_indices;
   unsigned int num_potential_start_indices;
   
   /* Buffer size is always num_potential_start_indices. */
   unsigned int *potential_start_index_positions;
   
   /* Length is always num_potential_start_indices. */
-  cl_ulong *hash_base_indices;
+  gpu_ulong *hash_base_indices;
 
   gpu_dev gpu;
 } thread_args;
@@ -131,7 +131,7 @@ typedef struct {
 
 /* Struct to pass to binary search threads. */
 typedef struct {
-  cl_ulong *rainbow_table;
+  gpu_ulong *rainbow_table;
   unsigned int num_chains;
   precomputed_and_potential_indices *ppi_head;
   unsigned int thread_number;
@@ -142,7 +142,7 @@ typedef struct {
 /* Struct to hold node in linked list of preloaded tables. */
 struct _preloaded_table {
   char *filepath;
-  cl_ulong *rainbow_table;
+  gpu_ulong *rainbow_table;
   unsigned int num_chains;
   struct _preloaded_table *next;
 };
@@ -159,7 +159,7 @@ void free_loaded_hashes(char **usernames, char **hashes);
 void *host_thread_false_alarm(void *ptr);
 void *preloading_thread(void *ptr);
 void print_eta_precompute();
-cl_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, char *filename, unsigned int filename_size);
+gpu_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, char *filename, unsigned int filename_size);
 void search_tables(unsigned int total_tables, precomputed_and_potential_indices *ppi, thread_args *args);
 void save_cracked_hash(precomputed_and_potential_indices *ppi, unsigned int hash_type);
 
@@ -200,7 +200,7 @@ size_t user_provided_gws = 0;
 int disable_platform = -1;
 
 /* The total number of precomputed indices loaded into memory.  Each one of these is
- * a cl_ulong (8 bytes). */
+ * a gpu_ulong (8 bytes). */
 uint64_t total_precomputed_indices_loaded = 0;
 
 /* Set to 1 if the NTLM8/9 message was printed.  This prevents console spam. */
@@ -258,15 +258,15 @@ unsigned int num_hashes_precomputed_total = 0;
 
 /* Adds a potential start index (and position within the chain) to check for false
  * alarms. */
-void add_potential_start_index_and_position(precomputed_and_potential_indices *ppi, cl_ulong start, unsigned int position) {
+void add_potential_start_index_and_position(precomputed_and_potential_indices *ppi, gpu_ulong start, unsigned int position) {
   #define POTENTIAL_START_INDICES_INITIAL_SIZE 16
 
   LOCK_PPI();
 
   /* Initialize the potential_start_indices buffer if it isn't already. */
   if (ppi->potential_start_indices == NULL) {
-    ppi->potential_start_indices = calloc(POTENTIAL_START_INDICES_INITIAL_SIZE, sizeof(cl_ulong));
-    ppi->potential_start_index_positions = calloc(POTENTIAL_START_INDICES_INITIAL_SIZE, sizeof(cl_ulong));
+    ppi->potential_start_indices = calloc(POTENTIAL_START_INDICES_INITIAL_SIZE, sizeof(gpu_ulong));
+    ppi->potential_start_index_positions = calloc(POTENTIAL_START_INDICES_INITIAL_SIZE, sizeof(gpu_ulong));
     if ((ppi->potential_start_indices == NULL) || (ppi->potential_start_index_positions == NULL)) {
       fprintf(stderr, "Failed to initialize potential_start_indices / potential_start_index_positions buffer.\n");
       exit(-1);
@@ -279,8 +279,8 @@ void add_potential_start_index_and_position(precomputed_and_potential_indices *p
     unsigned int new_size_in_ulongs = ppi->potential_start_indices_size * 2;
 
     /*printf("Resizing array from %u to %u.\n", ppi->potential_start_indices_size, new_size_in_ulongs);*/
-    ppi->potential_start_indices = recalloc(ppi->potential_start_indices, new_size_in_ulongs * sizeof(cl_ulong), ppi->potential_start_indices_size * sizeof(cl_ulong));
-    ppi->potential_start_index_positions = recalloc(ppi->potential_start_index_positions, new_size_in_ulongs * sizeof(cl_ulong), ppi->potential_start_indices_size * sizeof(cl_ulong));
+    ppi->potential_start_indices = recalloc(ppi->potential_start_indices, new_size_in_ulongs * sizeof(gpu_ulong), ppi->potential_start_indices_size * sizeof(gpu_ulong));
+    ppi->potential_start_index_positions = recalloc(ppi->potential_start_index_positions, new_size_in_ulongs * sizeof(gpu_ulong), ppi->potential_start_indices_size * sizeof(gpu_ulong));
     if ((ppi->potential_start_indices == NULL) || (ppi->potential_start_index_positions == NULL)) {
       fprintf(stderr, "Failed to re-allocate potential_start_indices/potential_start_index_positions buffer to %u.\n", new_size_in_ulongs);
       exit(-1);
@@ -299,15 +299,15 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   pthread_t threads[MAX_NUM_DEVICES] = {0};
   char time_str[128] = {0};
   struct timespec start_time = {0};
-  cl_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
+  gpu_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
 
   unsigned int num_potential_start_indices = 0, i = 0, j = 0; // init to -1 since 0 is possible index
   unsigned int total_devices = args[0].total_devices;
-  cl_ulong plaintext_space_total = 0;
+  gpu_ulong plaintext_space_total = 0;
   double time_delta = 0.0;
 
   precomputed_and_potential_indices *ppi_cur = ppi;
-  cl_ulong *potential_start_indices = NULL, *hash_base_indices = NULL;
+  gpu_ulong *potential_start_indices = NULL, *hash_base_indices = NULL;
   unsigned int *potential_start_index_positions = NULL;
   precomputed_and_potential_indices **ppi_refs = NULL;
 
@@ -327,9 +327,9 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   num_falsealarms += num_potential_start_indices;
 
   /* Allocate a buffer to hold them all. */
-  potential_start_indices = calloc(num_potential_start_indices, sizeof(cl_ulong));
-  potential_start_index_positions = calloc(num_potential_start_indices, sizeof(cl_ulong));
-  hash_base_indices = calloc(num_potential_start_indices, sizeof(cl_ulong));
+  potential_start_indices = calloc(num_potential_start_indices, sizeof(gpu_ulong));
+  potential_start_index_positions = calloc(num_potential_start_indices, sizeof(gpu_ulong));
+  hash_base_indices = calloc(num_potential_start_indices, sizeof(gpu_ulong));
   ppi_refs = calloc(num_potential_start_indices, sizeof(precomputed_and_potential_indices *));
   if ((potential_start_indices == NULL) || (potential_start_index_positions == NULL) || (hash_base_indices == NULL) || (ppi_refs == NULL)) {
     fprintf(stderr, "Error while creating buffer for potential start indices/positions/hash indices/ppi refs.\n");
@@ -350,7 +350,7 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   while(ppi_cur) {
     unsigned char hash[MAX_HASH_OUTPUT_LEN] = {0};
     unsigned int hash_len = hex_to_bytes(ppi_cur->hash, sizeof(hash), hash);
-    cl_ulong hash_base_index = hash_to_index(hash, hash_len, args->reduction_offset, plaintext_space_total, 0);  /* We always use position 0 here.  When the GPU code is comparing indices, it will add in the current position. */
+    gpu_ulong hash_base_index = hash_to_index(hash, hash_len, args->reduction_offset, plaintext_space_total, 0);  /* We always use position 0 here.  When the GPU code is comparing indices, it will add in the current position. */
 
 
     if (ppi_cur->plaintext == NULL) {
@@ -493,7 +493,7 @@ void check_memory_usage() {
   if (total_memory == 0)
     return;
 
-  num_precompute_bytes = total_precomputed_indices_loaded * sizeof(cl_ulong);
+  num_precompute_bytes = total_precomputed_indices_loaded * sizeof(gpu_ulong);
   percent_memory_used = ((double)num_precompute_bytes / (double)total_memory) * 100;
   if (percent_memory_used > 65) {
     printf("\n\n\n\t!! WARNING !!\n\n\tThe pre-computed indices take up more than 65%% of total RAM!  This may result in strange failures from clFinish() and other OpenCL functions.  If this happens, either run this lookup with a smaller number of hashes at a time, or do it on a machine with more memory.\n\n\tMemory used by pre-compute indices: %"QUOTE PRIu64"\n\tTotal RAM: %"QUOTE PRIu64"\n\tPercent used: %.1f%%\n\n\n\n", num_precompute_bytes, total_memory, percent_memory_used);
@@ -682,23 +682,23 @@ unsigned int get_num_cpu_cores() {
 void *host_thread_false_alarm(void *ptr) {
   thread_args *args = (thread_args *)ptr;
   gpu_dev *gpu = &(args->gpu);
-  cl_context context = NULL;
-  cl_command_queue queue = NULL;
-  cl_kernel kernel = NULL;
+  gpu_context context = NULL;
+  gpu_queue queue = NULL;
+  gpu_kernel kernel = NULL;
   int err = 0;
   char *kernel_path = FALSE_ALARM_KERNEL_PATH, *kernel_name = "false_alarm_check";
 
-  cl_mem hash_type_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, reduction_offset_buffer = NULL, plaintext_space_total_buffer = NULL, plaintext_space_up_to_index_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, num_start_indices_buffer = NULL, start_indices_buffer = NULL, start_index_positions_buffer = NULL, hash_base_indices_buffer = NULL, output_block_buffer = NULL, exec_block_scaler_buffer = NULL;
-  /*cl_mem debug_ulong_buffer = NULL;*/
+  gpu_buffer hash_type_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, reduction_offset_buffer = NULL, plaintext_space_total_buffer = NULL, plaintext_space_up_to_index_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, num_start_indices_buffer = NULL, start_indices_buffer = NULL, start_index_positions_buffer = NULL, hash_base_indices_buffer = NULL, output_block_buffer = NULL, exec_block_scaler_buffer = NULL;
+  /*gpu_buffer debug_ulong_buffer = NULL;*/
 
-  cl_ulong *start_indices = NULL, *hash_base_indices = NULL, *plaintext_indices = NULL, *output_block = NULL;
+  gpu_ulong *start_indices = NULL, *hash_base_indices = NULL, *plaintext_indices = NULL, *output_block = NULL;
   unsigned int *start_index_positions = NULL;
 
   unsigned int num_start_indices = 0, num_start_index_positions = 0, num_hash_base_indices = 0, num_plaintext_indices = 0, num_exec_blocks = 0, output_block_len = 0, exec_block = 0, output_block_index = 0, plaintext_indicies_index = 0;
   uint64_t plaintext_space_total = 0;
-  cl_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
+  gpu_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
   size_t gws = 0, kernel_work_group_size = 0, kernel_preferred_work_group_size_multiple = 0;
-  /*cl_ulong debug_ulong[128] = {0};*/
+  /*gpu_ulong debug_ulong[128] = {0};*/
   int charset_len = 0;
   if (strcmp(args->charset_name, "byte") == 0) {
     charset_len = 256;
@@ -715,7 +715,7 @@ void *host_thread_false_alarm(void *ptr) {
   start_index_positions = args->potential_start_index_positions;
   hash_base_indices = args->hash_base_indices;
 
-  plaintext_indices = calloc(num_plaintext_indices, sizeof(cl_ulong));
+  plaintext_indices = calloc(num_plaintext_indices, sizeof(gpu_ulong));
   if (plaintext_indices == NULL) {
     fprintf(stderr, "Error while allocating buffers.\n");
     exit(-1);
@@ -795,31 +795,31 @@ void *host_thread_false_alarm(void *ptr) {
   //printf("num_exec_blocks: %d, num_start_indices: %d\n", num_exec_blocks, num_start_indices);
 
   output_block_len = gws;
-  output_block = calloc(output_block_len, sizeof(cl_ulong));
+  output_block = calloc(output_block_len, sizeof(gpu_ulong));
   if (output_block == NULL) {
     fprintf(stderr, "Error while allocating output buffer(s).\n");
     exit(-1);
   }
 
-  CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(cl_uint));
+  CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
   CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, charset_len);
-  CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(cl_uint));
-  CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(cl_uint));
-  CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(cl_uint));
-  CLCREATEARG(5, plaintext_space_total_buffer, CL_RO, plaintext_space_total, sizeof(cl_ulong));
-  CLCREATEARG_ARRAY(6, plaintext_space_up_to_index_buffer, CL_RO, plaintext_space_up_to_index, MAX_PLAINTEXT_LEN * sizeof(cl_ulong));
-  CLCREATEARG(7, device_num_buffer, CL_RO, gpu->device_number, sizeof(cl_uint));
-  CLCREATEARG(8, total_devices_buffer, CL_RO, args->total_devices, sizeof(cl_uint));
-  CLCREATEARG(9, num_start_indices_buffer, CL_RO, num_start_indices, sizeof(cl_uint));
-  CLCREATEARG_ARRAY(10, start_indices_buffer, CL_RO, start_indices, num_start_indices * sizeof(cl_ulong));
+  CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
+  CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
+  CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(gpu_uint));
+  CLCREATEARG(5, plaintext_space_total_buffer, CL_RO, plaintext_space_total, sizeof(gpu_ulong));
+  CLCREATEARG_ARRAY(6, plaintext_space_up_to_index_buffer, CL_RO, plaintext_space_up_to_index, MAX_PLAINTEXT_LEN * sizeof(gpu_ulong));
+  CLCREATEARG(7, device_num_buffer, CL_RO, gpu->device_number, sizeof(gpu_uint));
+  CLCREATEARG(8, total_devices_buffer, CL_RO, args->total_devices, sizeof(gpu_uint));
+  CLCREATEARG(9, num_start_indices_buffer, CL_RO, num_start_indices, sizeof(gpu_uint));
+  CLCREATEARG_ARRAY(10, start_indices_buffer, CL_RO, start_indices, num_start_indices * sizeof(gpu_ulong));
   CLCREATEARG_ARRAY(11, start_index_positions_buffer, CL_RO, start_index_positions, num_start_index_positions * sizeof(unsigned int));
-  CLCREATEARG_ARRAY(12, hash_base_indices_buffer, CL_RO, hash_base_indices, num_hash_base_indices * sizeof(cl_ulong));
-  CLCREATEARG_ARRAY(14, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(cl_ulong));
+  CLCREATEARG_ARRAY(12, hash_base_indices_buffer, CL_RO, hash_base_indices, num_hash_base_indices * sizeof(gpu_ulong));
+  CLCREATEARG_ARRAY(14, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(gpu_ulong));
 
   for (exec_block = 0; exec_block < num_exec_blocks; exec_block++) {
     unsigned int exec_block_scaler = exec_block * gws;
 
-    CLCREATEARG(13, exec_block_scaler_buffer, CL_RO, exec_block_scaler, sizeof(cl_uint));
+    CLCREATEARG(13, exec_block_scaler_buffer, CL_RO, exec_block_scaler, sizeof(gpu_uint));
 
     if (is_amd_gpu) {
       int barrier_ret = pthread_barrier_wait(&barrier);
@@ -835,7 +835,7 @@ void *host_thread_false_alarm(void *ptr) {
     CLWAIT(gpu->queue);
 
     /* Read the results. */
-    CLREADBUFFER(output_block_buffer, output_block_len * sizeof(cl_ulong), output_block);
+    CLREADBUFFER(output_block_buffer, output_block_len * sizeof(gpu_ulong), output_block);
 
     output_block_index = 0;
     while ((plaintext_indicies_index < num_plaintext_indices) && (output_block_index < output_block_len))
@@ -879,21 +879,21 @@ void *host_thread_false_alarm(void *ptr) {
 void *host_thread_precompute(void *ptr) {
   thread_args *args = (thread_args *)ptr;
   gpu_dev *gpu = &(args->gpu);
-  cl_context context = NULL;
-  cl_command_queue queue = NULL;
-  cl_kernel kernel = NULL;
+  gpu_context context = NULL;
+  gpu_queue queue = NULL;
+  gpu_kernel kernel = NULL;
   int err = 0;
   char *kernel_path = PRECOMPUTE_KERNEL_PATH, *kernel_name = "precompute";
 
-  cl_mem hash_type_buffer = NULL, hash_buffer = NULL, hash_len_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, chain_len_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, exec_block_scaler_buffer = NULL, output_block_buffer = NULL/*, debug_buffer = NULL*/;
+  gpu_buffer hash_type_buffer = NULL, hash_buffer = NULL, hash_len_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, chain_len_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, exec_block_scaler_buffer = NULL, output_block_buffer = NULL/*, debug_buffer = NULL*/;
 
   size_t gws = 0;
-  cl_ulong *output = NULL, *output_block = NULL;
+  gpu_ulong *output = NULL, *output_block = NULL;
   unsigned int output_len = 0, output_block_len = 0, num_exec_blocks = 0, exec_block = 0, output_index = 0, output_block_index = 0;
   /*unsigned int i = 0;*/
 
   unsigned char hash_binary[32] = {0};
-  cl_uint hash_binary_len = 0;
+  gpu_uint hash_binary_len = 0;
 
 
   /* Convert the hash from a hex string to bytes.*/
@@ -957,11 +957,11 @@ void *host_thread_precompute(void *ptr) {
   /*printf("Host thread #%u started; GWS: %zu.\n", gpu->device_number, gws);*/
 
   /* This will hold the results from this one GPU. */
-  output = calloc(output_len, sizeof(cl_ulong));
+  output = calloc(output_len, sizeof(gpu_ulong));
 
   /* Holds the results from one kernel exec. */
   output_block_len = gws;
-  output_block = calloc(output_block_len, sizeof(cl_ulong));
+  output_block = calloc(output_block_len, sizeof(gpu_ulong));
 
   if ((output == NULL) || (output_block == NULL)) {
     fprintf(stderr, "Error while allocating output buffer(s).\n");
@@ -980,24 +980,24 @@ void *host_thread_precompute(void *ptr) {
   }
 
 
-  CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(cl_uint));
+  CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
   CLCREATEARG_ARRAY(1, hash_buffer, CL_RO, hash_binary, hash_binary_len);
-  CLCREATEARG(2, hash_len_buffer, CL_RO, hash_binary_len, sizeof(cl_uint));
+  CLCREATEARG(2, hash_len_buffer, CL_RO, hash_binary_len, sizeof(gpu_uint));
   CLCREATEARG_ARRAY(3, charset_buffer, CL_RO, args->charset, charset_len);
-  CLCREATEARG(4, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(cl_uint));
-  CLCREATEARG(5, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(cl_uint));
-  CLCREATEARG(6, table_index_buffer, CL_RO, args->table_index, sizeof(cl_uint));
-  CLCREATEARG(7, chain_len_buffer, CL_RO, args->chain_len, sizeof(cl_ulong));
-  CLCREATEARG(8, device_num_buffer, CL_RO, gpu->device_number, sizeof(cl_uint));
-  CLCREATEARG(9, total_devices_buffer, CL_RO, args->total_devices, sizeof(cl_uint));
-  CLCREATEARG_ARRAY(11, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(cl_ulong));
+  CLCREATEARG(4, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
+  CLCREATEARG(5, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
+  CLCREATEARG(6, table_index_buffer, CL_RO, args->table_index, sizeof(gpu_uint));
+  CLCREATEARG(7, chain_len_buffer, CL_RO, args->chain_len, sizeof(gpu_ulong));
+  CLCREATEARG(8, device_num_buffer, CL_RO, gpu->device_number, sizeof(gpu_uint));
+  CLCREATEARG(9, total_devices_buffer, CL_RO, args->total_devices, sizeof(gpu_uint));
+  CLCREATEARG_ARRAY(11, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(gpu_ulong));
   /*CLCREATEARG_DEBUG(9, debug_buffer, debug_ptr);*/
 
   for (exec_block = 0; exec_block < num_exec_blocks; exec_block++) {
     unsigned int exec_block_scaler = exec_block * gws;
 
 
-    CLCREATEARG(10, exec_block_scaler_buffer, CL_RO, exec_block_scaler, sizeof(cl_uint));
+    CLCREATEARG(10, exec_block_scaler_buffer, CL_RO, exec_block_scaler, sizeof(gpu_uint));
 
     if (is_amd_gpu) {
       int barrier_ret = pthread_barrier_wait(&barrier);
@@ -1013,7 +1013,7 @@ void *host_thread_precompute(void *ptr) {
     CLWAIT(gpu->queue);
 
     /* Read the results. */
-    CLREADBUFFER(output_block_buffer, output_block_len * sizeof(cl_ulong), output_block);
+    CLREADBUFFER(output_block_buffer, output_block_len * sizeof(gpu_ulong), output_block);
 
     /* Append this block out output to the total output for this GPU. */
     output_block_index = 0;
@@ -1198,10 +1198,10 @@ void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_an
     /* Ok, so it turns out that we generated the array backwards.  Oh well.  We will
      * just iterate backwards here to compensate. */
     /*for (k = output_index - 1; k >= 0; k--)
-      fwrite(&(output[k]), sizeof(cl_ulong), 1, f);*/
+      fwrite(&(output[k]), sizeof(gpu_ulong), 1, f);*/
 
     for (k = 0; k < output_index; k++)
-      fwrite(&(output[k]), sizeof(cl_ulong), 1, f);
+      fwrite(&(output[k]), sizeof(gpu_ulong), 1, f);
 
     FCLOSE(f);
 
@@ -1261,7 +1261,7 @@ void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_an
   ppi->hash = args->hash;
   ppi->num_precomputed_end_indices = output_index;
 
-  ppi->precomputed_end_indices = calloc(ppi->num_precomputed_end_indices, sizeof(cl_ulong));
+  ppi->precomputed_end_indices = calloc(ppi->num_precomputed_end_indices, sizeof(gpu_ulong));
   if (ppi->precomputed_end_indices == NULL) {
     fprintf(stderr, "Error allocating index buffer for precomputed indices.\n");
     exit(-1);
@@ -1303,7 +1303,7 @@ void _preloading_thread(char *rt_dir) {
 
     /* If this is a compressed or uncompressed rainbow table, load it! */
     } else if (str_ends_with(de->d_name, ".rt") || str_ends_with(de->d_name, ".rtc") || str_ends_with(de->d_name, ".rt.rar") || str_ends_with(de->d_name, ".rtc.rar")) {
-      cl_ulong *rainbow_table = NULL;
+      gpu_ulong *rainbow_table = NULL;
       unsigned int num_chains = 0, is_uncompressed_table = 0;
       struct timespec start_time_io = {0};
 
@@ -1335,16 +1335,16 @@ void _preloading_thread(char *rt_dir) {
 	if (f != NULL) {
 	  long file_size = get_file_size(f);
 
-	  if ((file_size % (sizeof(cl_ulong) * 2) == 0) && (file_size > 0)) {
-	    unsigned int num_longs = file_size / sizeof(cl_ulong);
+	  if ((file_size % (sizeof(gpu_ulong) * 2) == 0) && (file_size > 0)) {
+	    unsigned int num_longs = file_size / sizeof(gpu_ulong);
 
-	    rainbow_table = calloc(num_longs, sizeof(cl_ulong));
+	    rainbow_table = calloc(num_longs, sizeof(gpu_ulong));
 	    if (rainbow_table == NULL) {
-	      fprintf(stderr, "Failed to allocate %"PRIu64" bytes for rainbow table!: %s\n", num_longs * sizeof(cl_ulong), filepath);
+	      fprintf(stderr, "Failed to allocate %"PRIu64" bytes for rainbow table!: %s\n", num_longs * sizeof(gpu_ulong), filepath);
 	      exit(-1);
 	    }
 
-	    if (fread(rainbow_table, sizeof(cl_ulong), num_longs, f) != num_longs) {
+	    if (fread(rainbow_table, sizeof(gpu_ulong), num_longs, f) != num_longs) {
 	      fprintf(stderr, "Error while reading rainbow table: %s\n", strerror(errno));
 	      exit(-1);
 	    }
@@ -1352,7 +1352,7 @@ void _preloading_thread(char *rt_dir) {
 	    time_io += get_elapsed(&start_time_io);
 	    num_chains = num_longs / 2;
 	  } else
-	    fprintf(stderr, "Rainbow table size is not a multiple of %"PRIu64": %ld\n", sizeof(cl_ulong) * 2, file_size);
+	    fprintf(stderr, "Rainbow table size is not a multiple of %"PRIu64": %ld\n", sizeof(gpu_ulong) * 2, file_size);
 
 	  FCLOSE(f);
 	} else
@@ -1499,7 +1499,7 @@ void print_usage_and_exit(char *prog_name, int exit_code) {
 
 
 /* Helper function for rt_binary_search(). */
-unsigned int _rt_binary_search(cl_ulong *rainbow_table, unsigned int low, unsigned int high, cl_ulong search_index, cl_ulong *start) {
+unsigned int _rt_binary_search(gpu_ulong *rainbow_table, unsigned int low, unsigned int high, gpu_ulong search_index, gpu_ulong *start) {
   unsigned int chain = 0;
 
 
@@ -1528,7 +1528,7 @@ void *rt_binary_search_thread(void *ptr) {
   search_thread_args *args = (search_thread_args *)ptr;
   precomputed_and_potential_indices *ppi_cur = args->ppi_head;
   unsigned int i = 0;
-  cl_ulong start = 0;
+  gpu_ulong start = 0;
 
 
   while (ppi_cur != NULL) {
@@ -1551,7 +1551,7 @@ void *rt_binary_search_thread(void *ptr) {
  * precomputed end indices.  If/when matches are found, the corresponding start indices
  * are added to the precomputed_and_potential_indices's potential_start_indices
  * array. */
-void rt_binary_search(cl_ulong *rainbow_table, unsigned int num_chains, precomputed_and_potential_indices *ppi_head) {
+void rt_binary_search(gpu_ulong *rainbow_table, unsigned int num_chains, precomputed_and_potential_indices *ppi_head) {
   struct timespec start_time_searching = {0};
   char time_searching_str[64] = {0};
   unsigned int num_threads = get_num_cpu_cores();
@@ -1688,13 +1688,13 @@ void save_cracked_hash(precomputed_and_potential_indices *ppi, unsigned int hash
 /* Searches the precompute cache for matching index data.  If found, an array of
  * indices is returned, num_indices set to the array size, and the filename buffer
  * is set to the *.index cache file. */
-cl_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, char *filename, unsigned int filename_size) {
+gpu_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, char *filename, unsigned int filename_size) {
   char buf[256] = {0};
   int file_size = 0;
   DIR *d = NULL;
   struct dirent *de = NULL;
   FILE *f = NULL;
-  cl_ulong *ret = NULL;
+  gpu_ulong *ret = NULL;
 
 
   *num_indices = 0;
@@ -1745,20 +1745,20 @@ cl_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, c
 
 	file_size = get_file_size(f);
 
-	if (file_size % sizeof(cl_ulong) != 0) {
-	  fprintf(stderr, "Precomputed indices file is not a multiple of %"PRIu64": %u\n", sizeof(cl_ulong), file_size);
+	if (file_size % sizeof(gpu_ulong) != 0) {
+	  fprintf(stderr, "Precomputed indices file is not a multiple of %"PRIu64": %u\n", sizeof(gpu_ulong), file_size);
 	  exit(-1);
 	}
 
-	*num_indices = file_size / sizeof(cl_ulong);
+	*num_indices = file_size / sizeof(gpu_ulong);
 
-	ret = calloc(*num_indices, sizeof(cl_ulong));
+	ret = calloc(*num_indices, sizeof(gpu_ulong));
 	if (ret == NULL) {
 	  fprintf(stderr, "Failed to create indices buffer.\n");
 	  exit(-1);
 	}
 
-	if (fread(ret, sizeof(cl_ulong), *num_indices, f) != *num_indices) {
+	if (fread(ret, sizeof(gpu_ulong), *num_indices, f) != *num_indices) {
 	  fprintf(stderr, "Failed to read indices file.\n");
 	  exit(-1);
 	}
@@ -1891,10 +1891,10 @@ int main(int ac, char **av) {
 
   rt_parameters rt_params = {0};
 
-  cl_platform_id platforms[MAX_NUM_PLATFORMS] = {0};
-  cl_device_id devices[MAX_NUM_DEVICES] = {0};
+  gpu_platform platforms[MAX_NUM_PLATFORMS] = {0};
+  gpu_device devices[MAX_NUM_DEVICES] = {0};
 
-  cl_uint num_platforms = 0, num_devices = 0;
+  gpu_uint num_platforms = 0, num_devices = 0;
 
   precomputed_and_potential_indices *ppi_head = NULL, *ppi_cur = NULL;
 

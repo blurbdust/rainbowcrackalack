@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "shared.h"
 #include "test_chain.h"
@@ -40,13 +40,13 @@
 
 
 int main(int ac, char **av) {
-  cl_platform_id platforms[MAX_NUM_PLATFORMS];
-  cl_device_id devices[MAX_NUM_DEVICES];
-  cl_context context;
-  cl_program program;
-  cl_kernel kernel;
+  gpu_platform platforms[MAX_NUM_PLATFORMS];
+  gpu_device devices[MAX_NUM_DEVICES];
+  gpu_context context;
+  gpu_program program;
+  gpu_kernel kernel;
   int err = 0;
-  cl_uint num_platforms = 0, num_devices = 0;
+  gpu_uint num_platforms = 0, num_devices = 0;
 
   int ret = 0;
   unsigned int hash_type = HASH_UNDEFINED, all_tests_passed = 1;
@@ -60,11 +60,7 @@ int main(int ac, char **av) {
 #endif
   get_platforms_and_devices(-1, MAX_NUM_PLATFORMS, platforms, &num_platforms, MAX_NUM_DEVICES, devices, &num_devices, 1);
 
-  context = rc_clCreateContext(NULL, num_devices, devices, context_callback, NULL, &err);
-  if (err < 0) {
-    fprintf(stderr, "Failed to create context: %d\n", err);
-    exit(-1);
-  }
+  context = CLCREATECONTEXT(context_callback, &(devices[0]));
 
 
   /* PRNG test */

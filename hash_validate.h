@@ -1,9 +1,8 @@
 #ifndef _HASH_VALIDATE_H
 #define _HASH_VALIDATE_H
 
-#include "opencl_setup.h"
-#include <CL/cl.h>
+#include "gpu_backend.h"
 
-cl_uint hash_str_to_type(char *hash_str);
+gpu_uint hash_str_to_type(char *hash_str);
 
 #endif

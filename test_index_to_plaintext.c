@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -29,9 +29,9 @@
 
 struct i2p_test {
   char charset[MAX_CHARSET_LEN];
-  cl_uint plaintext_len_min;
-  cl_uint plaintext_len_max;
-  cl_ulong index;
+  gpu_uint plaintext_len_min;
+  gpu_uint plaintext_len_max;
+  gpu_ulong index;
   char expected_plaintext[MAX_PLAINTEXT_LEN];
 };
 
@@ -55,7 +55,7 @@ struct i2p_test i2p_tests[] = {
 };
 
 
-int cpu_test_index_to_plaintext(char *charset, cl_uint plaintext_len_min, cl_uint plaintext_len_max, cl_ulong index, char *expected_plaintext) {
+int cpu_test_index_to_plaintext(char *charset, gpu_uint plaintext_len_min, gpu_uint plaintext_len_max, gpu_ulong index, char *expected_plaintext) {
   uint64_t plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
   char computed_plaintext[MAX_PLAINTEXT_LEN] = {0};
   unsigned int computed_plaintext_len = 0;
@@ -73,17 +73,17 @@ int cpu_test_index_to_plaintext(char *charset, cl_uint plaintext_len_min, cl_uin
 }
 
 
-int gpu_test_index_to_plaintext(cl_device_id device, cl_context context, cl_kernel kernel, char *charset, cl_uint plaintext_len_min, cl_uint plaintext_len_max, cl_ulong index, char *expected_plaintext) {
+int gpu_test_index_to_plaintext(gpu_device device, gpu_context context, gpu_kernel kernel, char *charset, gpu_uint plaintext_len_min, gpu_uint plaintext_len_max, gpu_ulong index, char *expected_plaintext) {
   CLMAKETESTVARS();
   int test_passed = 0;
 
-  cl_mem charset_buffer = NULL, charset_len_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, index_buffer = NULL, plaintext_buffer = NULL, plaintext_len_buffer = NULL, debug_buffer = NULL;
+  gpu_buffer charset_buffer = NULL, charset_len_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, index_buffer = NULL, plaintext_buffer = NULL, plaintext_len_buffer = NULL, debug_buffer = NULL;
 
   unsigned char *plaintext = NULL;
   unsigned char *debug_ptr = NULL;
 
-  cl_uint charset_len = strlen(charset);
-  cl_uint plaintext_len = MAX_PLAINTEXT_LEN;
+  gpu_uint charset_len = strlen(charset);
+  gpu_uint plaintext_len = MAX_PLAINTEXT_LEN;
 
 
   queue = CLCREATEQUEUE(context, device);
@@ -95,12 +95,12 @@ int gpu_test_index_to_plaintext(cl_device_id device, cl_context context, cl_kern
   }
 
   CLCREATEARG_ARRAY(0, charset_buffer, CL_RO, charset, strlen(charset) + 1);
-  CLCREATEARG(1, charset_len_buffer, CL_RO, charset_len, sizeof(cl_uint));
-  CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, plaintext_len_min, sizeof(cl_uint));
-  CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, plaintext_len_max, sizeof(cl_uint));
-  CLCREATEARG(4, index_buffer, CL_RO, index, sizeof(cl_ulong));
+  CLCREATEARG(1, charset_len_buffer, CL_RO, charset_len, sizeof(gpu_uint));
+  CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, plaintext_len_min, sizeof(gpu_uint));
+  CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, plaintext_len_max, sizeof(gpu_uint));
+  CLCREATEARG(4, index_buffer, CL_RO, index, sizeof(gpu_ulong));
   CLCREATEARG_ARRAY(5, plaintext_buffer, CL_WO, plaintext, MAX_PLAINTEXT_LEN);
-  CLCREATEARG(6, plaintext_len_buffer, CL_WO, plaintext_len, sizeof(cl_uint));
+  CLCREATEARG(6, plaintext_len_buffer, CL_WO, plaintext_len, sizeof(gpu_uint));
   CLCREATEARG_DEBUG(7, debug_buffer, debug_ptr);
 
   CLRUNKERNEL(queue, kernel, &global_work_size);
@@ -108,7 +108,7 @@ int gpu_test_index_to_plaintext(cl_device_id device, cl_context context, cl_kern
   CLWAIT(queue);
 
   CLREADBUFFER(plaintext_buffer, MAX_PLAINTEXT_LEN, plaintext);
-  CLREADBUFFER(plaintext_len_buffer, sizeof(cl_uint), &plaintext_len);
+  CLREADBUFFER(plaintext_len_buffer, sizeof(gpu_uint), &plaintext_len);
   CLREADBUFFER(debug_buffer, DEBUG_LEN, debug_ptr);
 
   /*
@@ -142,7 +142,7 @@ int gpu_test_index_to_plaintext(cl_device_id device, cl_context context, cl_kern
 }
 
 
-int test_index_to_plaintext(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_index_to_plaintext(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
 

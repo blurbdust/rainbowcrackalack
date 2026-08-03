@@ -17,9 +17,8 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <CL/cl.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 #include "test_des.h"
 
 
@@ -43,12 +42,12 @@ struct des_test des_tests[] = {
 };
 
 
-int _test_des(cl_device_id device, cl_context context, cl_kernel kernel, unsigned char *plaintext, unsigned char *testkey, unsigned char *ciphertext) {
+int _test_des(gpu_device device, gpu_context context, gpu_kernel kernel, unsigned char *plaintext, unsigned char *testkey, unsigned char *ciphertext) {
   CLMAKETESTVARS();
   int test_passed = 0;
 
-  cl_mem input_buffer = NULL, key_buffer = NULL, output_buffer = NULL;
-  cl_mem debug_buffer = NULL;
+  gpu_buffer input_buffer = NULL, key_buffer = NULL, output_buffer = NULL;
+  gpu_buffer debug_buffer = NULL;
 
   unsigned char *input = NULL, *key = NULL, *output = NULL;
   unsigned int *debug = NULL;
@@ -130,7 +129,7 @@ int _test_des(cl_device_id device, cl_context context, cl_kernel kernel, unsigne
 }
 
 
-int test_des(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_des(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
 

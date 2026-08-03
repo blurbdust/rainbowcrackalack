@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -56,12 +56,12 @@ int cpu_test_h2i_ntlm9(char *hash_hex, uint64_t plaintext_space_total, unsigned 
 }
 
 
-int gpu_test_h2i_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, char *hash_hex, unsigned int pos, uint64_t expected_index) {
+int gpu_test_h2i_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel, char *hash_hex, unsigned int pos, uint64_t expected_index) {
   CLMAKETESTVARS();
   int test_passed = 0;
-  cl_mem hash_buffer = NULL, pos_buffer = NULL, index_buffer = NULL;
-  cl_ulong hash_long = 0;
-  cl_ulong index = 0;
+  gpu_buffer hash_buffer = NULL, pos_buffer = NULL, index_buffer = NULL;
+  gpu_ulong hash_long = 0;
+  gpu_ulong index = 0;
   unsigned char hash[MAX_HASH_OUTPUT_LEN] = {0};
 
 
@@ -94,7 +94,7 @@ int gpu_test_h2i_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel
   CLFLUSH(queue);
   CLWAIT(queue); 
 
-  CLREADBUFFER(index_buffer, sizeof(cl_ulong), &index);
+  CLREADBUFFER(index_buffer, sizeof(gpu_ulong), &index);
 
 
   if (index == expected_index)
@@ -111,7 +111,7 @@ int gpu_test_h2i_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel
   return test_passed;
 }
 
-int test_h2i_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_h2i_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
   uint64_t plaintext_space_total = 0;

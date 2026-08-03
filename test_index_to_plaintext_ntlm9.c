@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -28,7 +28,7 @@
 #include "test_index_to_plaintext_ntlm9.h"
 
 struct i2p_ntlm9_test {
-  cl_ulong index;
+  gpu_ulong index;
   char expected_plaintext[MAX_PLAINTEXT_LEN];
 };
 
@@ -38,10 +38,10 @@ struct i2p_ntlm9_test i2p_ntlm9_tests[] = {
 
 
 
-int gpu_test_index_to_plaintext_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, cl_ulong index, char *expected_plaintext) {
+int gpu_test_index_to_plaintext_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel, gpu_ulong index, char *expected_plaintext) {
   CLMAKETESTVARS();
   int test_passed = 0;
-  cl_mem index_buffer = NULL, plaintext_buffer = NULL;
+  gpu_buffer index_buffer = NULL, plaintext_buffer = NULL;
   unsigned char *plaintext = NULL;
 
 
@@ -53,7 +53,7 @@ int gpu_test_index_to_plaintext_ntlm9(cl_device_id device, cl_context context, c
     exit(-1);
   }
 
-  CLCREATEARG(0, index_buffer, CL_RO, index, sizeof(cl_ulong));
+  CLCREATEARG(0, index_buffer, CL_RO, index, sizeof(gpu_ulong));
   CLCREATEARG_ARRAY(1, plaintext_buffer, CL_WO, plaintext, MAX_PLAINTEXT_LEN);
 
   CLRUNKERNEL(queue, kernel, &global_work_size);
@@ -78,7 +78,7 @@ int gpu_test_index_to_plaintext_ntlm9(cl_device_id device, cl_context context, c
 }
 
 
-int test_index_to_plaintext_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_index_to_plaintext_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
 

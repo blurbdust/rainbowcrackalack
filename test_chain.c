@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -88,16 +88,16 @@ int cpu_test_chain(char *charset, unsigned int plaintext_len_min, unsigned int p
 
 
 /* Test a chain using the GPU. */
-int gpu_test_chain(cl_device_id device, cl_context context, cl_kernel kernel, char *charset, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int table_index, unsigned int chain_len, uint64_t start, uint64_t expected_end) {
+int gpu_test_chain(gpu_device device, gpu_context context, gpu_kernel kernel, char *charset, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int table_index, unsigned int chain_len, uint64_t start, uint64_t expected_end) {
   CLMAKETESTVARS();
 
   int test_passed = 0;
 
-  cl_mem charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, chain_len_buffer = NULL, start_buffer = NULL, end_buffer = NULL, debug_buffer = NULL;
+  gpu_buffer charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, chain_len_buffer = NULL, start_buffer = NULL, end_buffer = NULL, debug_buffer = NULL;
 
   unsigned char *debug_ptr = NULL;
-  cl_ulong *end_ptr = NULL;
-  cl_ulong end = 0;
+  gpu_ulong *end_ptr = NULL;
+  gpu_ulong end = 0;
 
 
   queue = CLCREATEQUEUE(context, device);
@@ -115,13 +115,13 @@ int gpu_test_chain(cl_device_id device, cl_context context, cl_kernel kernel, ch
   CLFLUSH(queue);
   CLWAIT(queue); 
 
-  end_ptr = calloc(1, sizeof(cl_ulong));
+  end_ptr = calloc(1, sizeof(gpu_ulong));
   if (end_ptr == NULL) {
     fprintf(stderr, "Error while creating output buffer.\n");
     exit(-1);
   }
 
-  CLREADBUFFER(end_buffer, sizeof(cl_ulong), end_ptr);
+  CLREADBUFFER(end_buffer, sizeof(gpu_ulong), end_ptr);
 
   if (*end_ptr == expected_end)
     test_passed = 1;
@@ -153,7 +153,7 @@ int gpu_test_chain(cl_device_id device, cl_context context, cl_kernel kernel, ch
 }
 
 
-int test_chain(cl_device_id device, cl_context context, cl_kernel kernel, unsigned int hash_type) {
+int test_chain(gpu_device device, gpu_context context, gpu_kernel kernel, unsigned int hash_type) {
   int tests_passed = 1;
   unsigned int i = 0;
 

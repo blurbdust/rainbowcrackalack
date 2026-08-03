@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -61,7 +61,7 @@ int cpu_test_hash_ntlm9(char *input, char *expected_output_hex) {
 
 
 /* Creates and tests a hash using the GPU. */
-int gpu_test_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, char *_input, char *expected_output_hex) {
+int gpu_test_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel, char *_input, char *expected_output_hex) {
   CLMAKETESTVARS();
   int test_passed = 0;
   int i = 0;
@@ -69,10 +69,10 @@ int gpu_test_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, ch
   unsigned char expected_output[32] = {0};
   /*unsigned int expected_output_len = 0;*/
 
-  cl_mem input_buffer = NULL, output_buffer = NULL;
+  gpu_buffer input_buffer = NULL, output_buffer = NULL;
 
   char *input = NULL;
-  cl_ulong output = 0;
+  gpu_ulong output = 0;
   unsigned char actual_output[8] = {0};
 
 
@@ -85,13 +85,13 @@ int gpu_test_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, ch
   }
 
   CLCREATEARG_ARRAY(0, input_buffer, CL_RO, input, strlen(input) + 1);
-  CLCREATEARG(1, output_buffer, CL_WO, output, sizeof(cl_ulong));
+  CLCREATEARG(1, output_buffer, CL_WO, output, sizeof(gpu_ulong));
  
   CLRUNKERNEL(queue, kernel, &global_work_size);
   CLFLUSH(queue);
   CLWAIT(queue);
 
-  CLREADBUFFER(output_buffer, sizeof(cl_ulong), &output);
+  CLREADBUFFER(output_buffer, sizeof(gpu_ulong), &output);
 
   /*
   hash[i++] = ((output[0] >> 0) & 0xff);
@@ -136,7 +136,7 @@ int gpu_test_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, ch
 }
 
 
-int test_hash_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_hash_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
 

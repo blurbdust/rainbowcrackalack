@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -70,19 +70,19 @@ int cpu_test_h2i(char *hash_hex, uint64_t plaintext_space_total, unsigned int ta
 }
 
 
-int gpu_test_h2i(cl_device_id device, cl_context context, cl_kernel kernel, char *hash_hex, unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int table_index, unsigned int pos, uint64_t expected_index) {
+int gpu_test_h2i(gpu_device device, gpu_context context, gpu_kernel kernel, char *hash_hex, unsigned int charset_len, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int table_index, unsigned int pos, uint64_t expected_index) {
   CLMAKETESTVARS();
 
   int test_passed = 0;
 
-  cl_mem hash_buffer = NULL, hash_len_buffer = NULL, charset_len_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, pos_buffer = NULL, index_buffer = NULL, debug_buffer = NULL;
+  gpu_buffer hash_buffer = NULL, hash_len_buffer = NULL, charset_len_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, pos_buffer = NULL, index_buffer = NULL, debug_buffer = NULL;
 
   unsigned char hash[MAX_HASH_OUTPUT_LEN] = {0};
   unsigned int hash_len = 0;
-  cl_ulong index = 0;
+  gpu_ulong index = 0;
 
   unsigned char *debug_ptr = NULL;
-  cl_ulong *index_ptr = NULL;
+  gpu_ulong *index_ptr = NULL;
 
   queue = CLCREATEQUEUE(context, device);
 
@@ -101,13 +101,13 @@ int gpu_test_h2i(cl_device_id device, cl_context context, cl_kernel kernel, char
   CLFLUSH(queue);
   CLWAIT(queue); 
 
-  index_ptr = calloc(1, sizeof(cl_ulong));
+  index_ptr = calloc(1, sizeof(gpu_ulong));
   if (index_ptr == NULL) {
     fprintf(stderr, "Error while creating output buffer.\n");
     exit(-1);
   }
 
-  CLREADBUFFER(index_buffer, sizeof(cl_ulong), index_ptr);
+  CLREADBUFFER(index_buffer, sizeof(gpu_ulong), index_ptr);
 
   if (*index_ptr == expected_index)
     test_passed = 1;
@@ -139,7 +139,7 @@ int gpu_test_h2i(cl_device_id device, cl_context context, cl_kernel kernel, char
   return test_passed;
 }
 
-int test_h2i(cl_device_id device, cl_context context, cl_kernel kernel, unsigned int hash_type) {
+int test_h2i(gpu_device device, gpu_context context, gpu_kernel kernel, unsigned int hash_type) {
   int tests_passed = 1;
   unsigned int i = 0;
   uint64_t plaintext_space_total = 0;

@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "opencl_setup.h"
+#include "gpu_backend.h"
 
 #include "cpu_rt_functions.h"
 #include "misc.h"
@@ -63,16 +63,16 @@ int cpu_test_chain_ntlm9(uint64_t start, uint64_t expected_end) {
 
 
 /* Test a chain using the GPU. */
-int gpu_test_chain_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel, uint64_t start, uint64_t expected_end) {
+int gpu_test_chain_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel, uint64_t start, uint64_t expected_end) {
   CLMAKETESTVARS();
   int test_passed = 0;
-  cl_mem start_buffer = NULL, chain_len_buffer = NULL, pos_start_buffer = NULL;
-  cl_ulong end = 0;
-  cl_mem unused1 = NULL, unused2 = NULL, unused3 = NULL, unused4 = NULL, unused5 = NULL;
-  cl_uint unused_int = 0;
+  gpu_buffer start_buffer = NULL, chain_len_buffer = NULL, pos_start_buffer = NULL;
+  gpu_ulong end = 0;
+  gpu_buffer unused1 = NULL, unused2 = NULL, unused3 = NULL, unused4 = NULL, unused5 = NULL;
+  gpu_uint unused_int = 0;
   char unused_char[16] = {0};
-  cl_ulong *start_array = NULL, *end_array = NULL;
-  cl_uint chain_len = 803000, pos_start = 0;
+  gpu_ulong *start_array = NULL, *end_array = NULL;
+  gpu_uint chain_len = 803000, pos_start = 0;
 
 
   queue = CLCREATEQUEUE(context, device);
@@ -83,8 +83,8 @@ int gpu_test_chain_ntlm9(cl_device_id device, cl_context context, cl_kernel kern
   CLCREATEARG(2, end_buffer, CL_WO, end, sizeof(end));
   */
 
-  start_array = calloc(1, sizeof(cl_ulong));
-  end_array = calloc(1, sizeof(cl_ulong));
+  start_array = calloc(1, sizeof(gpu_ulong));
+  end_array = calloc(1, sizeof(gpu_ulong));
   if ((start_array == NULL) || (end_array == NULL)) {
     fprintf(stderr, "Error while allocating start & end arrays.\n");
     exit(-1);
@@ -98,15 +98,15 @@ int gpu_test_chain_ntlm9(cl_device_id device, cl_context context, cl_kernel kern
   CLCREATEARG(2, unused3, CL_RO, unused_int, sizeof(unused_int));
   CLCREATEARG(3, unused4, CL_RO, unused_int, sizeof(unused_int));
   CLCREATEARG(4, unused5, CL_RO, unused_int, sizeof(unused_int));
-  CLCREATEARG(5, chain_len_buffer, CL_RO, chain_len, sizeof(cl_uint));
-  CLCREATEARG_ARRAY(6, start_buffer, CL_RW, start_array, 1 * sizeof(cl_ulong));
-  CLCREATEARG(7, pos_start_buffer, CL_RO, pos_start, sizeof(cl_uint));
+  CLCREATEARG(5, chain_len_buffer, CL_RO, chain_len, sizeof(gpu_uint));
+  CLCREATEARG_ARRAY(6, start_buffer, CL_RW, start_array, 1 * sizeof(gpu_ulong));
+  CLCREATEARG(7, pos_start_buffer, CL_RO, pos_start, sizeof(gpu_uint));
 
   CLRUNKERNEL(queue, kernel, &global_work_size);
   CLFLUSH(queue);
   CLWAIT(queue); 
 
-  CLREADBUFFER(start_buffer, 1 * sizeof(cl_ulong), end_array);
+  CLREADBUFFER(start_buffer, 1 * sizeof(gpu_ulong), end_array);
 
 
   if (end_array[0] == expected_end)
@@ -130,7 +130,7 @@ int gpu_test_chain_ntlm9(cl_device_id device, cl_context context, cl_kernel kern
 }
 
 
-int test_chain_ntlm9(cl_device_id device, cl_context context, cl_kernel kernel) {
+int test_chain_ntlm9(gpu_device device, gpu_context context, gpu_kernel kernel) {
   int tests_passed = 1;
   unsigned int i = 0;
 

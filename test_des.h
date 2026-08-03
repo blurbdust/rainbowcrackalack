@@ -1,6 +1,6 @@
 #ifndef TEST_DES_H
 #define TEST_DES_H
 
-int test_des(cl_device_id device, cl_context context, cl_kernel kernel);
+int test_des(gpu_device device, gpu_context context, gpu_kernel kernel);
 
 #endif

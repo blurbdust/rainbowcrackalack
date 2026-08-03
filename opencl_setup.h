@@ -120,5 +120,6 @@ void get_platform_str(cl_platform_id device, cl_platform_info param, char *buf, 
 void load_kernel(cl_context context, cl_uint num_devices, const cl_device_id *devices, const char *path, const char *kernel_name, cl_program *program, cl_kernel *kernel, unsigned int hash_type);
 void print_device_info(cl_device_id *devices, cl_uint num_devices);
 void print_platform_info(cl_platform_id *platforms, cl_uint num_platforms);
+void gpu_release_device(cl_device_id device);
 
 #endif
