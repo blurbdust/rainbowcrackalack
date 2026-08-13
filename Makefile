@@ -247,6 +247,7 @@ $(OUTDIR)/$(LOOKUP_PROG): \
 	$(OBJDIR)/clock.o \
 	$(OBJDIR)/cpu_rt_functions.o \
 	$(OBJDIR)/crackalack_lookup.o \
+	$(OBJDIR)/fa_batch.o \
 	$(OBJDIR)/file_lock.o \
 	$(OBJDIR)/hash_validate.o \
 	$(OBJDIR)/misc.o \
