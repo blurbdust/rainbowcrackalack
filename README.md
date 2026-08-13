@@ -8,6 +8,18 @@ This project produces open-source code to generate rainbow tables as well as use
 
 For more information, see the project website: [https://www.rainbowcrackalack.com/](https://www.rainbowcrackalack.com/)
 
+## Big Changes as of 08/26
+
+Most of the speed work here started from bandrel's fork (https://github.com/bandrel/rainbowcrackalack). He's been doing great work on optimizations for this project.
+
+- Table preloading is multi-threaded. Was single threaded with a hardcoded 2 table window, now it's a pool of readers and the window scales with RAM. Roughly 5.5x faster end to end.
+- False alarm checks are batched across tables instead of one dispatch per table, and sorted by chain position first so a work group isn't running at the speed of its longest walk. Ported from bandrel.
+- Net-NTLMv1 has specialized precompute and false alarm kernels, ported from bandrel. Gated on the standard set (byte, 7-7, 881689) the same way the NTLM8/9 kernels are. Precompute is about 28x faster, false alarm checks about 60x with the batching on top.
+- Precompute runs every hash in one dispatch instead of one at a time, split across all GPUs. Output is byte identical to the old path and added a test for it.
+- CUDA backend now has CI coverage. tests/cuda_stub fakes the driver so the host side runs without a GPU. Added a 64 table lookup suite and a check that batched and unbatched precompute produce identical cache files.
+- New options: `-fa-batch`, `-precompute-batch`, `-precompute-gws`, plus `RCRACK_LOAD_THREADS` and `MAX_PRELOAD_NUM` env vars.
+- The precalc cache is read from the current directory, not the table directory, and a hash's precalc gets deleted once it cracks.
+
 ## NTLM Tables
 
 NTLM 8-character tables (93% effective) are available for [free download via Bittorrent](https://www.rainbowcrackalack.com/rainbow_crackalack_ntlm_8.torrent).
