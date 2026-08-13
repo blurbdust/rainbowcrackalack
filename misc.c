@@ -101,6 +101,8 @@ char *get_os_name() {
   else
     return "An old version of Windows";
   */
+#elif defined(__APPLE__)
+  return "macOS";
 #else
   return "Linux";
 #endif

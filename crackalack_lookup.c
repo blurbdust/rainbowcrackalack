@@ -2036,13 +2036,14 @@ static void size_load_pool(const table_path_list *list) {
   window = threads + 2;
 
   if (largest > 0) {
-#ifdef __linux__
-    struct sysinfo si;
-    if (sysinfo(&si) == 0) {
-      uint64_t budget = ((uint64_t)si.totalram * si.mem_unit) / PRELOAD_RAM_FRACTION;
-      ram_limit = (unsigned int)(budget / largest);
-    }
-#endif
+    /* get_total_memory() covers Linux, macOS and Windows, so the clamp applies
+     * everywhere.  Without it a machine with many cores and little RAM would
+     * size the window off the core count alone and try to hold far more table
+     * than it has memory for. */
+    uint64_t total_ram = get_total_memory();
+    if (total_ram > 0)
+      ram_limit = (unsigned int)((total_ram / PRELOAD_RAM_FRACTION) / largest);
+
     if (ram_limit > 0) {
       if (window > ram_limit) window = ram_limit;
       if (threads > window) threads = window;
