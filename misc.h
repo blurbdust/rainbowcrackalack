@@ -76,6 +76,7 @@ uint64_t get_total_memory();
 unsigned int hash_str_to_type(char *hash_str);
 unsigned int is_ntlm8(unsigned int hash_type, char *charset, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int reduction_offset, unsigned int chain_len);
 unsigned int is_ntlm9(unsigned int hash_type, char *charset, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int reduction_offset, unsigned int chain_len);
+unsigned int is_netntlmv1_7(unsigned int hash_type, char *charset_name, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int chain_len);
 void parse_rt_params(rt_parameters *rt_params, char *rt_filename);
 void *recalloc(void *ptr, size_t new_size, size_t old_size);
 size_t rt_log(rc_file f, const char *fmt, ...);

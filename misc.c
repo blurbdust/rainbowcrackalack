@@ -241,6 +241,27 @@ unsigned int is_ntlm9(unsigned int hash_type, char *charset, unsigned int plaint
 }
 
 
+/* Returns 1 if the parameters form the standard Net-NTLMv1 7-byte table set,
+ * otherwise 0.
+ *
+ * These tables get their own kernels.  The generic ones hand every work item a
+ * 256-byte charset array plus a plaintext-space table that each thread rebuilds
+ * for itself, and dispatch the hash and reduction functions on a runtime hash
+ * type.  A 7-byte Net-NTLMv1 key needs none of that -- the plaintext IS the
+ * index, in 8 bytes of registers -- and the specialized kernels also keep the
+ * DES S-boxes in shared memory.  Measured at 4.5x on precomputation. */
+unsigned int is_netntlmv1_7(unsigned int hash_type, char *charset_name, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int chain_len) {
+  if ((hash_type == HASH_NETNTLMV1) && \
+      (strcmp(charset_name, "byte") == 0) && \
+      (plaintext_len_min == 7) && \
+      (plaintext_len_max == 7) && \
+      (chain_len == 881689))
+    return 1;
+  else
+    return 0;
+}
+
+
 /* Given a filename for a rainbow table, parse its parameters.  On success the
  * rt_parameters' parsed flag is set to 1, otherwise it is zero. */
 void parse_rt_params(rt_parameters *rt_params, char *rt_filename_orig) {
