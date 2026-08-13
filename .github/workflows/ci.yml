@@ -45,8 +45,38 @@ jobs:
       - name: Show OpenCL devices
         run: clinfo --list
 
+      # Runs every suite, including "manytables": one lookup across 64 table
+      # parts, which is the only suite that can see a resource leak accumulating
+      # from one table to the next.  Under pocl it exercises the OpenCL backend;
+      # the same suite reproduces the CUDA failure when run on a GPU box.
       - name: Net-NTLMv1 correctness tests
         run: python3 tests/test_netntlmv1.py
+
+      # Batched pre-computation must be a pure speedup, so its cache files have
+      # to be byte-identical to the one-hash-at-a-time path's.  Everything
+      # downstream reads them, so a divergence here would silently corrupt
+      # results rather than fail loudly.
+      - name: Pre-compute batching equivalence
+        run: python3 tests/test_precompute_batch.py --chain-len 2000
+
+  cuda-backend:
+    name: CUDA backend (stub driver, no GPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+
+      # GitHub-hosted runners have no GPU and no CUDA toolkit, so the CUDA
+      # backend used to get zero CI coverage of any kind.  That is how a
+      # fixed-size kernel arg table shipped a crash that only appeared ~32
+      # tables into a real lookup run.  tests/cuda_stub/ fakes the driver so the
+      # host-side bookkeeping in cuda_setup.c can be tested anywhere.
+      - name: CUDA host-logic tests against the stub driver
+        run: tests/run_cuda_stub_tests.sh
 
   windows-cross:
     name: Windows cross-build

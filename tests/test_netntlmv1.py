@@ -6,7 +6,7 @@
 # device, including a CPU ICD such as pocl, so they work on CI machines with no
 # GPU.
 #
-# Three suites:
+# Four suites:
 #
 #   reference  Anchor the independent Python model (tests/netntlmv1_ref.py) on
 #              published DES vectors and on the Net-NTLMv1 capture published in
@@ -24,7 +24,14 @@
 #              Exercises the precompute kernel, the binary search and the false
 #              alarm check without needing a real multi-gigabyte table.
 #
-# Usage: tests/test_netntlmv1.py [reference | generate | lookup]   (default: all)
+#   manytables Run one lookup across many table parts, each rigged to produce a
+#              false alarm.  The lookup binary sets up and tears down GPU
+#              resources per table, so this is the only suite that can see a leak
+#              which accumulates from one table to the next -- the failure mode
+#              that took down a real 4096-part run.
+#
+# Usage: tests/test_netntlmv1.py [reference | generate | lookup | manytables]
+#        (default: all)
 #
 
 import hashlib
@@ -71,6 +78,14 @@ LOOKUP_TESTS = [
     (3, 100, 1024, 999, 0),    # first position, non-zero reduction offset
     (0, 250, 2048, 8675309, 248),  # last position in the chain
 ]
+
+# How many table parts the many-tables suite plants.  crackalack_lookup sets up
+# and tears down GPU resources once per table, so anything it fails to release
+# accumulates across a run.  This has to exceed any fixed internal limit for the
+# suite to be worth running -- the CUDA backend's kernel argument registry was
+# capped at 64 entries and burned one per table per device, so a two-GPU run
+# died on table 32.  64 parts clears that on a single-device runner too.
+MANY_TABLES_PARTS = 64
 
 
 def strip_ansi(s):
@@ -276,10 +291,84 @@ def do_lookup_tests(workdir):
     return all_passed
 
 
+# --- manytables --------------------------------------------------------------
+
+def do_many_tables_test(workdir):
+    """Run one lookup across many table parts, to catch per-table resource leaks.
+
+    The single-table lookup tests above cannot see a leak that only accumulates
+    from one table to the next.  A real run walks thousands of parts, and that is
+    where the CUDA backend used to die: every part spawned a false-alarm thread
+    that loaded its own kernel module, and the arg table for each was never
+    released.
+
+    Every part here is built to produce a false alarm, so no part cracks the
+    hash and lookup keeps going through all of them.  Each false alarm is what
+    forces the kernel load, which is the resource being leaked.
+    """
+    table_index, chain_len, num_chains, start_index, position = 0, 100, 1024, 424242, 37
+    print("Many tables: %u parts, each forcing a false alarm... "
+          % MANY_TABLES_PARTS, end="", flush=True)
+
+    reduction_offset = ref.table_index_to_reduction_offset(table_index)
+    end_index, plaintext, hash_value = ref.walk_chain(
+        start_index, chain_len, reduction_offset, stop_at=position)
+    if plaintext is None:
+        return fail("position %u is outside the chain" % position)
+
+    rt_dir = tempfile.mkdtemp(prefix="manytables", dir=workdir)
+    rng = random.Random(0x5EED)
+
+    for part in range(MANY_TABLES_PARTS):
+        # end_index is a genuine candidate, so the binary search hits in every
+        # part and a false-alarm check is dispatched.  Pairing it with a random
+        # start index means walking the chain does not reproduce the hash, so the
+        # check always comes back negative and the run continues to the next part.
+        chains = [(rng.getrandbits(56), end_index)]
+        while len(chains) < num_chains:
+            chains.append((rng.getrandbits(56), rng.getrandbits(56)))
+        write_table(os.path.join(rt_dir, "netntlmv1_byte#7-7_%u_%ux%u_%u.rt"
+                                 % (table_index, chain_len, num_chains, part)), chains)
+
+    hashes_file = os.path.join(rt_dir, "hashes.txt")
+    with open(hashes_file, "w") as f:
+        f.write(hash_value.hex() + "\n")
+
+    pot_file = os.path.join(rt_dir, "out.pot")
+    try:
+        proc = subprocess.run([LOOKUP_PROG, rt_dir, hashes_file, pot_file],
+                              cwd=workdir, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=3600)
+    except subprocess.TimeoutExpired:
+        return fail("crackalack_lookup did not finish %u parts within an hour"
+                    % MANY_TABLES_PARTS)
+
+    output = strip_ansi(proc.stdout.decode("utf-8", "replace"))
+    if proc.returncode != 0:
+        tail = "\n".join(output.splitlines()[-40:])
+        return fail("crackalack_lookup exited %d after starting %u parts. "
+                    "A crash here is the signature of a per-table resource leak.\n"
+                    "Last output:\n%s"
+                    % (proc.returncode, MANY_TABLES_PARTS, tail))
+
+    # Every part has to have been opened; stopping early would hide a leak that
+    # only bites deeper into the set.
+    processed = len(re.findall(r"^\[\s*\d+ of \d+\] Processing table:", output, re.M))
+    if processed < MANY_TABLES_PARTS:
+        tail = "\n".join(output.splitlines()[-40:])
+        return fail("only %u of %u parts were processed.\nLast output:\n%s"
+                    % (processed, MANY_TABLES_PARTS, tail))
+
+    shutil.rmtree(rt_dir, ignore_errors=True)
+    print("%spassed%s (%u parts, %u false alarm checks, no crash)."
+          % (GREEN, CLR, processed, processed))
+    return True
+
+
 def main():
     suite = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if suite not in ("all", "reference", "generate", "lookup"):
-        print("Usage: %s [reference | generate | lookup]" % sys.argv[0])
+    if suite not in ("all", "reference", "generate", "lookup", "manytables"):
+        print("Usage: %s [reference | generate | lookup | manytables]" % sys.argv[0])
         return 2
 
     for prog in (GEN_PROG, LOOKUP_PROG):
@@ -297,6 +386,8 @@ def main():
             passed &= do_generate_tests(workdir)
         if suite in ("all", "lookup"):
             passed &= do_lookup_tests(workdir)
+        if suite in ("all", "manytables"):
+            passed &= do_many_tables_test(workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -1,0 +1,52 @@
+name: CUDA backend on a real GPU
+
+# Manual only.  GitHub-hosted runners have no GPU on any free plan, and the
+# GPU-backed larger runners (NVIDIA Tesla T4) are a paid Team/Enterprise Cloud
+# feature.  So this workflow does not run on push -- point it at a self-hosted
+# runner with an NVIDIA GPU, or at a GPU larger-runner label if the account has
+# them.
+#
+# Day to day, the CUDA backend's host-side logic is covered by the "cuda-backend"
+# job in ci.yml, which fakes the driver (tests/cuda_stub/) and needs no GPU.
+# This workflow is for the part a stub cannot cover: kernels actually executing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label (self-hosted GPU runner, or a GPU larger-runner label)'
+        required: true
+        default: 'self-hosted'
+      cuda_path:
+        description: 'CUDA toolkit install prefix'
+        required: false
+        default: '/usr/local/cuda'
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-gpu:
+    name: CUDA build and Net-NTLMv1 tests on GPU
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show GPU and toolkit
+        run: |
+          nvidia-smi
+          "${{ inputs.cuda_path }}/bin/nvcc" --version || echo "nvcc not found (NVRTC is what matters at runtime)"
+
+      - name: Build the CUDA backend
+        run: |
+          make clean
+          make linux-cuda -j"$(nproc)" CUDA_PATH="${{ inputs.cuda_path }}"
+
+      # "manytables" is the one that matters here: it walks 64 table parts in a
+      # single run, which is what exhausted the kernel argument registry on a
+      # two-GPU box partway through a 4096-part set.
+      - name: Net-NTLMv1 correctness tests
+        run: python3 tests/test_netntlmv1.py
+
+      - name: GPU unit tests
+        run: ./crackalack_unit_tests
