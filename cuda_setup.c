@@ -10,6 +10,7 @@
  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -38,7 +39,6 @@ static CUcontext g_default_context = NULL;
  * at most CUDA_MAX_KERNEL_ARGS args.  Keep slots indexed by the
  * arg_index passed to gpu_set_kernel_arg. */
 #define CUDA_MAX_KERNEL_ARGS    32
-#define CUDA_MAX_TRACKED_KERNELS 64
 
 typedef struct {
   CUfunction kernel;
@@ -51,8 +51,22 @@ typedef struct {
   unsigned int max_set_index;  /* highest arg_index set + 1 */
 } cuda_kernel_args;
 
-static cuda_kernel_args g_cuda_arg_tables[CUDA_MAX_TRACKED_KERNELS];
-static unsigned int     g_cuda_arg_tables_used = 0;
+/* Registry of live arg tables.  This used to be a fixed 64-entry array that was
+ * only ever appended to, because gpu_release_kernel was a no-op.  crackalack_lookup
+ * spawns a fresh false-alarm thread per table, and each one loads its own module,
+ * so a multi-GPU run burned one slot per table per device and aborted partway
+ * through a large table set (see tests/test_cuda_arg_tables.c).
+ *
+ * Entries are now individually allocated and dropped in gpu_release_kernel.  The
+ * indirection matters: params[i] points at the same struct's storage[i], so the
+ * tables themselves must not move when the registry grows. */
+static cuda_kernel_args **g_cuda_arg_tables      = NULL;
+static unsigned int       g_cuda_arg_tables_used = 0;
+static unsigned int       g_cuda_arg_tables_cap  = 0;
+
+/* Guards the three variables above.  Every GPU worker thread loads and releases
+ * its own kernels, so the registry is touched concurrently. */
+static pthread_mutex_t    g_cuda_arg_tables_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Shared 8-byte dummy device allocation used to pad kernel-argument slots that
  * the host never sets.  blurbdust's feature-trimmed host code (no markov / mask
@@ -61,8 +75,10 @@ static unsigned int     g_cuda_arg_tables_used = 0;
  * declared parameter, so a NULL slot yields CUDA_ERROR_INVALID_VALUE
  * ("invalid argument").  Pointing every unset slot at this valid (never
  * dereferenced) allocation makes such launches legal.  (The bandrel fork
- * avoids this by binding all args from its markov/mask code paths.) */
-static CUdeviceptr cuda_get_dummy_arg(void) {
+ * avoids this by binding all args from its markov/mask code paths.)
+ *
+ * Caller must hold g_cuda_arg_tables_lock. */
+static CUdeviceptr cuda_get_dummy_arg_locked(void) {
   static CUdeviceptr dummy = 0;
   if (dummy == 0) {
     CUresult res = cuMemAlloc(&dummy, 8);
@@ -76,26 +92,79 @@ static CUdeviceptr cuda_get_dummy_arg(void) {
   return dummy;
 }
 
-static cuda_kernel_args *cuda_get_arg_table(CUfunction k) {
+/* Caller must hold g_cuda_arg_tables_lock.  Returns k's registry index, or -1. */
+static int cuda_find_arg_table_locked(CUfunction k) {
   for (unsigned int i = 0; i < g_cuda_arg_tables_used; i++)
-    if (g_cuda_arg_tables[i].kernel == k) return &g_cuda_arg_tables[i];
-  if (g_cuda_arg_tables_used >= CUDA_MAX_TRACKED_KERNELS) {
-    fprintf(stderr, "cuda_setup: too many tracked kernels (max %d)\n",
-            CUDA_MAX_TRACKED_KERNELS);
+    if (g_cuda_arg_tables[i]->kernel == k) return (int)i;
+  return -1;
+}
+
+/* Drop the arg table keyed on `k`, if any.  Safe to call for a kernel that was
+ * never bound.  Entries hold no CUDA resources of their own, so this is a plain
+ * free plus a swap-remove; handing out a cuda_kernel_args* stays safe across
+ * other threads' removals because only the pointer array is reshuffled. */
+static void cuda_forget_arg_table(CUfunction k) {
+  if (k == NULL) return;
+  pthread_mutex_lock(&g_cuda_arg_tables_lock);
+  int idx = cuda_find_arg_table_locked(k);
+  if (idx >= 0) {
+    free(g_cuda_arg_tables[idx]);
+    g_cuda_arg_tables[idx] = g_cuda_arg_tables[--g_cuda_arg_tables_used];
+  }
+  pthread_mutex_unlock(&g_cuda_arg_tables_lock);
+}
+
+static cuda_kernel_args *cuda_get_arg_table(CUfunction k) {
+  pthread_mutex_lock(&g_cuda_arg_tables_lock);
+
+  int idx = cuda_find_arg_table_locked(k);
+  if (idx >= 0) {
+    cuda_kernel_args *found = g_cuda_arg_tables[idx];
+    pthread_mutex_unlock(&g_cuda_arg_tables_lock);
+    return found;
+  }
+
+  if (g_cuda_arg_tables_used == g_cuda_arg_tables_cap) {
+    unsigned int new_cap = (g_cuda_arg_tables_cap == 0) ? 16 : g_cuda_arg_tables_cap * 2;
+    cuda_kernel_args **grown = realloc(g_cuda_arg_tables, new_cap * sizeof(*grown));
+    if (grown == NULL) {
+      pthread_mutex_unlock(&g_cuda_arg_tables_lock);
+      fprintf(stderr, "cuda_setup: out of memory growing kernel arg table registry to %u\n", new_cap);
+      exit(-1);
+    }
+    g_cuda_arg_tables     = grown;
+    g_cuda_arg_tables_cap = new_cap;
+  }
+
+  cuda_kernel_args *t = calloc(1, sizeof(*t));
+  if (t == NULL) {
+    pthread_mutex_unlock(&g_cuda_arg_tables_lock);
+    fprintf(stderr, "cuda_setup: out of memory allocating a kernel arg table\n");
     exit(-1);
   }
-  cuda_kernel_args *t = &g_cuda_arg_tables[g_cuda_arg_tables_used++];
-  memset(t, 0, sizeof(*t));
   t->kernel = k;
   /* Pre-populate every slot with the shared dummy pointer so any parameter the
    * host leaves unset is still a valid (non-NULL) CUdeviceptr at launch time.
    * Real args overwrite their slot in gpu_set_kernel_arg(). */
-  CUdeviceptr dummy = cuda_get_dummy_arg();
+  CUdeviceptr dummy = cuda_get_dummy_arg_locked();
   for (unsigned int i = 0; i < CUDA_MAX_KERNEL_ARGS; i++) {
     t->storage[i] = dummy;
     t->params[i]  = &t->storage[i];
   }
+
+  g_cuda_arg_tables[g_cuda_arg_tables_used++] = t;
+  pthread_mutex_unlock(&g_cuda_arg_tables_lock);
   return t;
+}
+
+/* Number of live arg tables.  Exposed for the regression test in
+ * tests/test_cuda_arg_tables.c, which asserts the registry stays bounded across
+ * repeated load/release cycles. */
+unsigned int cuda_num_tracked_kernels(void) {
+  pthread_mutex_lock(&g_cuda_arg_tables_lock);
+  unsigned int n = g_cuda_arg_tables_used;
+  pthread_mutex_unlock(&g_cuda_arg_tables_lock);
+  return n;
 }
 
 /* Forward declaration — defined just before gpu_create_context. */
@@ -572,6 +641,12 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
     exit(-1);
   }
 
+  /* Unloading a module frees its CUfunction addresses, and a later load can be
+   * handed the same address back.  Drop any table still keyed on it so this
+   * kernel starts from fresh bindings even if its predecessor was never
+   * released.  Normally a no-op: gpu_release_kernel already did this. */
+  cuda_forget_arg_table(fn);
+
   *program = mod;
   *kernel  = fn;
 }
@@ -681,7 +756,15 @@ void gpu_release_context(gpu_context c)  {
   if (g_default_context == c) g_default_context = NULL;
   cuCtxDestroy(c);
 }
-void gpu_release_kernel (gpu_kernel k)   { (void)k; /* CUfunction is owned by its module */ }
+void gpu_release_kernel (gpu_kernel k)   {
+  /* The CUfunction itself is owned by its module, so there is nothing to free
+   * on the CUDA side.  Its arg table is ours, though, and dropping it here is
+   * what bounds the registry across a long run.  It also closes an aliasing
+   * hazard: an unloaded module's CUfunction address can be handed back out by a
+   * later cuModuleGetFunction, and a stale table would silently supply the dead
+   * kernel's argument bindings. */
+  cuda_forget_arg_table(k);
+}
 void gpu_release_program(gpu_program p)  { if (p) cuModuleUnload(p); }
 
 int gpu_set_kernel_arg(gpu_kernel k, unsigned int idx, size_t size, const void *value) {

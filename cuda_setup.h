@@ -123,6 +123,11 @@ void gpu_release_kernel(gpu_kernel kernel);
 void gpu_release_program(gpu_program program);
 void gpu_release_device(gpu_device device);
 
+/* Number of kernels with a live argument table inside cuda_setup.c.  This is an
+ * implementation detail exposed only so tests/test_cuda_arg_tables.c can assert
+ * the registry stays bounded across repeated kernel load/release cycles. */
+unsigned int cuda_num_tracked_kernels(void);
+
 /* Backend-neutral VRAM backpressure helper.  In the OpenCL build this lives in
  * gws.c; the CUDA build provides it inside cuda_setup.c so cuda_setup.o is
  * self-contained (unit_tests links the backend obj but not gws.o). */
