@@ -47,8 +47,10 @@
 #include "charset.h"
 #include "clock.h"
 #include "cpu_rt_functions.h"
+#include "fa_batch.h"
 #include "hash_validate.h"
 #include "misc.h"
+#include "ppi.h"
 #include "rar_decompress.h"
 #include "rtc_decompress.h"
 #include "shared.h"
@@ -58,6 +60,16 @@
 
 #define VERBOSE 1
 #define PRECOMPUTE_KERNEL_PATH "precompute.cl"
+#define PRECOMPUTE_BATCH_KERNEL_PATH "precompute_batch.cl"
+#define PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH "precompute_netntlmv1_7_batch.cl"
+#define FALSE_ALARM_NETNTLMV1_7_KERNEL_PATH "false_alarm_check_netntlmv1_7.cl"
+
+/* The Net-NTLMv1 kernels take the server challenge as an argument.  This fork
+ * only supports the fixed challenge that its DES code is specialized for (the
+ * initial-permutation state in CL/netntlmv1.cl is precomputed for it), so it is
+ * supplied as a constant rather than plumbed through from the capture. */
+static const unsigned char netntlmv1_challenge[8] =
+  { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
 #define PRECOMPUTE_NTLM8_KERNEL_PATH "precompute_ntlm8.cl"
 #define PRECOMPUTE_NTLM9_KERNEL_PATH "precompute_ntlm9.cl"
 #define PRECOMPUTE_NETNTLMV1_KERNEL_PATH "precompute_netntlmv1.cl"
@@ -71,23 +83,7 @@
 #define HASH_FILE_FORMAT_PWDUMP 2
 
 
-/* Struct to form a linked list of precomputed end indices, and potential start indices (which are usually false alarms). */
-struct _precomputed_and_potential_indices {
-  char *username;  /* Non-NULL if loaded file format is pwdump. */
-  char *hash;
-  gpu_ulong *precomputed_end_indices;
-  gpu_uint num_precomputed_end_indices;
-
-  gpu_ulong *potential_start_indices;
-  unsigned int num_potential_start_indices;
-  unsigned int potential_start_indices_size;
-  unsigned int *potential_start_index_positions; /* Buffer size is always num_potential_start_indices. */
-
-  char *plaintext;        /* Set if hash is cracked. */
-  char *index_filename;   /* File path containing the ".index" file. */
-  struct _precomputed_and_potential_indices *next;
-};
-typedef struct _precomputed_and_potential_indices precomputed_and_potential_indices;
+/* precomputed_and_potential_indices lives in ppi.h so fa_batch.c can see it. */
 
 
 /* Struct to represent one GPU device. */
@@ -119,6 +115,12 @@ typedef struct {
   unsigned int total_devices;
   uint64_t *results;
   unsigned int num_results;
+
+  /* Batched precomputation: one dispatch covers several hashes at once.
+   * batch_hashes holds num_batch_hashes hex strings; results then holds
+   * num_batch_hashes * num_results entries, hash-major. */
+  char **batch_hashes;
+  unsigned int num_batch_hashes;
 
   gpu_ulong *potential_start_indices;
   unsigned int num_potential_start_indices;
@@ -161,7 +163,13 @@ unsigned int count_tables(char *dir);
 void find_rt_params(char *dir, rt_parameters *rt_params);
 void free_loaded_hashes(char **usernames, char **hashes);
 void *host_thread_false_alarm(void *ptr);
+void *host_thread_precompute(void *ptr);
+void *host_thread_precompute_batch(void *ptr);
+void build_precompute_index_data(char *buf, size_t buf_size, const thread_args *args, const char *hash);
+void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_and_potential_indices **ppi_head, int results_ready, unsigned int batch_slot);
+void precompute_hashes(unsigned int num_devices, thread_args *args, precomputed_and_potential_indices **ppi_head, char **usernames, char **hashes, unsigned int num_hashes);
 void *preloading_thread(void *ptr);
+void stop_table_loading(void);
 void print_eta_precompute();
 gpu_ulong *search_precompute_cache(char *index_data, unsigned int *num_indices, char *filename, unsigned int filename_size);
 void search_tables(unsigned int total_tables, precomputed_and_potential_indices *ppi, thread_args *args);
@@ -170,8 +178,12 @@ void save_cracked_hash(precomputed_and_potential_indices *ppi, unsigned int hash
 
 /* The path of the pot file to store cracked hashes in.  This can be overridden by
  * a command line arg. */
-char jtr_pot_filename[128] = "rainbowcrackalack_jtr.pot";
-char hashcat_pot_filename[128] = "rainbowcrackalack_hashcat.pot";
+/* Sized generously (PATH_MAX-class) so a long user-supplied pot path plus the
+ * appended ".hashcat" suffix cannot silently truncate.  At 128 bytes a deep path
+ * (a CI build directory, say) truncated ".hashcat" to ".hash", so the hashcat
+ * pot went to the wrong filename and looked like a failed write. */
+char jtr_pot_filename[4096] = "rainbowcrackalack_jtr.pot";
+char hashcat_pot_filename[4096] = "rainbowcrackalack_hashcat.pot";
 
 /* The number of seconds spent on precomputation, file I/O, searching, and false alarm
  * checking. */
@@ -199,6 +211,27 @@ unsigned int is_amd_gpu = 0;
 
 /* The global work size, as over-ridden by the user on the command line. */
 size_t user_provided_gws = 0;
+
+/* How many false-alarm candidates to pool across tables before dispatching them
+ * to the GPU (see fa_batch.h).  1 disables pooling, restoring the historical
+ * one-dispatch-per-table behaviour.  Override with -fa-batch. */
+unsigned int fa_batch_threshold = 16384;
+
+/* Global work size for the precompute phase, as overridden on the command line.
+ * 0 means "one work group per compute unit", which measurement says is as good
+ * as anything: sweeping this from 12288 up to a single whole-output dispatch on
+ * an RTX 4000 SFF Ada moved precompute by under 20% and did not even move
+ * monotonically, and the ordering flipped between chain lengths.  Precompute is
+ * not occupancy-limited, so this exists to retune a specific GPU rather than
+ * because a better default is known.  tests/bench_precompute.py sweeps it. */
+size_t user_provided_precompute_gws = 0;
+
+/* Largest number of hashes precomputed in a single dispatch.  Each GPU holds a
+ * (group size * positions per device * 8) byte output buffer, which at a
+ * production chain length is a few MB per hash, so this bounds VRAM rather than
+ * speed.  Override with -precompute-batch. */
+#define PRECOMPUTE_BATCH_MAX_DEFAULT 32
+unsigned int PRECOMPUTE_BATCH_MAX = PRECOMPUTE_BATCH_MAX_DEFAULT;
 
 /* The platform number to disable (-1 to not disable any). */
 int disable_platform = -1;
@@ -249,9 +282,25 @@ unsigned int num_hashes_precomputed = 0;
 unsigned int num_hashes_precomputed_total = 0;
 
 
-/* The total number of tables to preload in memory while binary searching and false
- * alarm checking is done by the main thread. */
-#define MAX_PRELOAD_NUM 2
+/* The number of tables allowed in memory at once while binary searching and
+ * false alarm checking is done by the main thread.
+ *
+ * This used to be a hard 2, loaded by a single thread.  That made table loading
+ * the bottleneck of the whole run: with a window of 2 the loader can only ever
+ * be one table ahead, so the consumer spent most of its time blocked waiting for
+ * the next read.  It is now a runtime value sized against the loader thread
+ * count and clamped to a fraction of system RAM, since each in-flight table is
+ * held whole in memory (2 GiB apiece for the Net-NTLMv1 set).
+ *
+ * Override with MAX_PRELOAD_NUM in the environment. */
+#define MAX_PRELOAD_NUM_DEFAULT 2
+unsigned int max_preload_num = MAX_PRELOAD_NUM_DEFAULT;
+
+/* How many threads read tables concurrently.  Override with RCRACK_LOAD_THREADS. */
+unsigned int num_load_threads = 1;
+
+/* Fraction of total RAM the in-flight table window is allowed to occupy. */
+#define PRELOAD_RAM_FRACTION 4   /* i.e. one quarter */
 
 #define LOCK_PPI() \
   if (pthread_mutex_lock(&ppi_mutex)) { perror("Failed to lock mutex"); exit(-1); }
@@ -299,46 +348,39 @@ void add_potential_start_index_and_position(precomputed_and_potential_indices *p
 }
 
 
-void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *args) {
+/* Dispatch the false-alarm kernel for every candidate currently pooled in
+ * `batch`, then map the results back onto the hashes they came from.
+ *
+ * The candidates no longer come from a single table: search_tables() pools them
+ * across tables and calls this once the pool is big enough to keep the GPU busy
+ * (see fa_batch.h).  `batch` stays untouched here -- the caller resets it after
+ * this returns, which is safe because this function does not return until every
+ * device thread has been joined and its results consumed. */
+void check_false_alarms(fa_batch_t *batch, thread_args *args) {
   pthread_t threads[MAX_NUM_DEVICES] = {0};
   char time_str[128] = {0};
   struct timespec start_time = {0};
   gpu_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
 
-  unsigned int num_potential_start_indices = 0, i = 0, j = 0; // init to -1 since 0 is possible index
+  unsigned int num_potential_start_indices = batch->num_candidates;
+  unsigned int i = 0, j = 0;
   unsigned int total_devices = args[0].total_devices;
-  gpu_ulong plaintext_space_total = 0;
   double time_delta = 0.0;
 
-  precomputed_and_potential_indices *ppi_cur = ppi;
-  gpu_ulong *potential_start_indices = NULL, *hash_base_indices = NULL;
-  unsigned int *potential_start_index_positions = NULL;
-  precomputed_and_potential_indices **ppi_refs = NULL;
+  precomputed_and_potential_indices **ppi_refs = batch->ppi_refs;
 
 
-  /* First count all the potential start indices. */
-  while(ppi_cur) {
-    num_potential_start_indices += ppi_cur->num_potential_start_indices;
-    ppi_cur = ppi_cur->next;
-  }
-  // nic come back
-  /* If no potential matches were found, there's nothing else to do. */
-  if (num_potential_start_indices == 0) { // was 0
-    printf("No matches found in table.\n");
+  /* If no potential matches were pooled, there's nothing else to do. */
+  if (num_potential_start_indices == 0) {
+    printf("No matches found in batch.\n");
     return;
   }
-  printf("  Checking %u potential matches...\n", num_potential_start_indices);  fflush(stdout);
+  printf("  Checking %u potential matches (across %u table%s)...\n",
+         num_potential_start_indices, batch->tables_in_batch,
+         (batch->tables_in_batch == 1) ? "" : "s");
+  fflush(stdout);
   num_falsealarms += num_potential_start_indices;
 
-  /* Allocate a buffer to hold them all. */
-  potential_start_indices = calloc(num_potential_start_indices, sizeof(gpu_ulong));
-  potential_start_index_positions = calloc(num_potential_start_indices, sizeof(gpu_ulong));
-  hash_base_indices = calloc(num_potential_start_indices, sizeof(gpu_ulong));
-  ppi_refs = calloc(num_potential_start_indices, sizeof(precomputed_and_potential_indices *));
-  if ((potential_start_indices == NULL) || (potential_start_index_positions == NULL) || (hash_base_indices == NULL) || (ppi_refs == NULL)) {
-    fprintf(stderr, "Error while creating buffer for potential start indices/positions/hash indices/ppi refs.\n");
-    exit(-1);
-  }
   int charset_len = 0;
   if (strcmp(args->charset_name, "byte") == 0) {
     charset_len = 256;
@@ -347,33 +389,13 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
     charset_len = strlen(args->charset) + 1;
   }
 
-  plaintext_space_total = fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
+  fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
 
-  /* Collate all the start indices into one buffer. */
-  ppi_cur = ppi;
-  while(ppi_cur) {
-    unsigned char hash[MAX_HASH_OUTPUT_LEN] = {0};
-    unsigned int hash_len = hex_to_bytes(ppi_cur->hash, sizeof(hash), hash);
-    gpu_ulong hash_base_index = hash_to_index(hash, hash_len, args->reduction_offset, plaintext_space_total, 0);  /* We always use position 0 here.  When the GPU code is comparing indices, it will add in the current position. */
-
-
-    if (ppi_cur->plaintext == NULL) {
-      for (i = 0; i < ppi_cur->num_potential_start_indices; i++, j++) {
-	potential_start_indices[j] = ppi_cur->potential_start_indices[i];
-	potential_start_index_positions[j] = ppi_cur->potential_start_index_positions[i];
-	hash_base_indices[j] = hash_base_index;
-
-	/* For this index, hold a reference to the ppi struct.  This later lets us find
-	 * the ppi, given a result index from the GPU. */
-	ppi_refs[j] = ppi_cur;
-      }
-    }
-
-    ppi_cur = ppi_cur->next;
-  }
-
-  /*for (i = 0; i < num_potential_start_indices; i++)
-    printf("Start point: %lu; Chain position: %u; hash base index: %lu\n", potential_start_indices[i], potential_start_index_positions[i], hash_base_indices[i]);*/
+  /* Order candidates by chain position before dispatch.  Adjacent work items
+   * land in the same work group, and the kernel walks each chain from its start
+   * index to its recorded position, so a group with mixed positions runs at the
+   * speed of its longest walk.  Sorting is the single biggest win in this path. */
+  fa_batch_sort_by_position(batch);
 
   /* Start the timer false alarm checking. */
   start_timer(&start_time);
@@ -382,10 +404,10 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   for (i = 0; i < total_devices; i++) {
 
     /* Each thread gets the same reference to the list of potential start indices. */
-    args[i].potential_start_indices = potential_start_indices;
+    args[i].potential_start_indices = batch->start_indices;
     args[i].num_potential_start_indices = num_potential_start_indices;
-    args[i].potential_start_index_positions = potential_start_index_positions;
-    args[i].hash_base_indices = hash_base_indices;
+    args[i].potential_start_index_positions = batch->start_index_positions;
+    args[i].hash_base_indices = batch->hash_base_indices;
 
     if (pthread_create(&(threads[i]), NULL, &host_thread_false_alarm, &(args[i]))) {
       perror("Failed to create thread");
@@ -406,6 +428,13 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   /* Search for valid results, and update the ppi with the plaintext. */
   for (i = 0; i < total_devices; i++) {
     for (j = 0; j < args[i].num_results; j++) {
+      /* A batch can hold several candidates for the same hash, and more than
+       * one of them can be genuine.  Without this the second one would overwrite
+       * (and leak) the plaintext, write the pot file again and double-count the
+       * crack. */
+      if ((j < num_potential_start_indices) && (ppi_refs[j]->plaintext != NULL))
+        continue;
+
       if (args[i].results[j] != 0) {
       	char plaintext[MAX_PLAINTEXT_LEN] = {0};
       	unsigned int plaintext_len = 0;
@@ -479,12 +508,12 @@ void check_false_alarms(precomputed_and_potential_indices *ppi, thread_args *arg
   seconds_to_human_time(time_str, sizeof(time_str), (unsigned int)time_delta);
   printf("  Completed false alarm checks in %s.\n", time_str);  fflush(stdout);
 
-  FREE(potential_start_indices);
-  FREE(potential_start_index_positions);
-  FREE(hash_base_indices);
-  FREE(ppi_refs);
-  FREE(args->results);
-  args->num_results = 0;
+  /* The candidate arrays belong to the batch; the caller resets it.  Only the
+   * per-device result buffers are ours to free. */
+  for (i = 0; i < total_devices; i++) {
+    FREE(args[i].results);
+    args[i].num_results = 0;
+  }
 }
 
 
@@ -693,7 +722,9 @@ void *host_thread_false_alarm(void *ptr) {
   gpu_kernel kernel = NULL;
   int err = 0;
   char *kernel_path = FALSE_ALARM_KERNEL_PATH, *kernel_name = "false_alarm_check";
+  int use_netntlmv1_7 = 0;
 
+  gpu_buffer challenge_buffer = NULL;
   gpu_buffer hash_type_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, reduction_offset_buffer = NULL, plaintext_space_total_buffer = NULL, plaintext_space_up_to_index_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, num_start_indices_buffer = NULL, start_indices_buffer = NULL, start_index_positions_buffer = NULL, hash_base_indices_buffer = NULL, output_block_buffer = NULL, exec_block_scaler_buffer = NULL;
   /*gpu_buffer debug_ulong_buffer = NULL;*/
 
@@ -741,6 +772,16 @@ void *host_thread_false_alarm(void *ptr) {
     kernel_name = "false_alarm_check_ntlm9";
     if ((args->gpu.device_number == 0) && (printed_false_alarm_optimized_message == 0)) { /* Only the first thread prints this, and only prints it once. */
       printf("\nNote: optimized NTLM9 kernel will be used for false alarm checks.\n\n"); fflush(stdout);
+      printed_false_alarm_optimized_message = 1;
+    }
+  } else if (is_netntlmv1_7(args->hash_type, args->charset_name, args->plaintext_len_min, args->plaintext_len_max, args->chain_len)) {
+    /* Same specialized chain walk as the precompute kernel: no per-thread
+     * charset or plaintext-space table, and DES S-boxes in shared memory. */
+    kernel_path = FALSE_ALARM_NETNTLMV1_7_KERNEL_PATH;
+    kernel_name = "false_alarm_check_netntlmv1_7";
+    use_netntlmv1_7 = 1;
+    if ((args->gpu.device_number == 0) && (printed_false_alarm_optimized_message == 0)) { /* Only the first thread prints this, and only prints it once. */
+      printf("\nNote: optimized Net-NTLMv1-7 kernel will be used for false alarm checks.\n\n"); fflush(stdout);
       printed_false_alarm_optimized_message = 1;
     }
   }
@@ -830,6 +871,9 @@ void *host_thread_false_alarm(void *ptr) {
   CLCREATEARG_ARRAY(12, hash_base_indices_buffer, CL_RO, hash_base_indices, num_hash_base_indices * sizeof(gpu_ulong));
   CLCREATEARG_ARRAY(14, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(gpu_ulong));
 
+  if (use_netntlmv1_7)
+    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, netntlmv1_challenge, sizeof(netntlmv1_challenge));
+
   for (exec_block = 0; exec_block < num_exec_blocks; exec_block++) {
     unsigned int exec_block_scaler = exec_block * gws;
 
@@ -878,6 +922,239 @@ void *host_thread_false_alarm(void *ptr) {
   CLFREEBUFFER(start_index_positions_buffer);
   CLFREEBUFFER(hash_base_indices_buffer);
   CLFREEBUFFER(output_block_buffer);
+  CLFREEBUFFER(challenge_buffer);
+
+  CLRELEASEKERNEL(gpu->kernel);
+  CLRELEASEPROGRAM(gpu->program);
+  CLRELEASEQUEUE(gpu->queue);
+  CLRELEASECONTEXT(gpu->context);
+
+  pthread_exit(NULL);
+  return NULL;
+}
+
+
+/* A host thread which controls each GPU for BATCHED hash pre-computation.
+ *
+ * This is the generic path (everything except the NTLM8/NTLM9 tables, which
+ * keep their own optimized single-hash kernels in host_thread_precompute).
+ *
+ * Precomputation is O(chain_len^2) per hash and used to run once per hash,
+ * sequentially, so N hashes cost N times one hash -- the dominant start-up cost
+ * of a lookup.  Batching makes N hashes cost about the same as one.
+ *
+ * Why this works when simply enlarging the work size does not: the work item at
+ * chain position p walks (chain_len - p) steps, so widening a dispatch along the
+ * position axis just makes the chunk run at the speed of its longest walk while
+ * the short ones sit idle -- measured, and it bought nothing.  Every hash at a
+ * given position walks exactly the same number of steps, so widening along the
+ * hash axis multiplies parallelism with no added divergence at all. */
+void *host_thread_precompute_batch(void *ptr) {
+  thread_args *args = (thread_args *)ptr;
+  gpu_dev *gpu = &(args->gpu);
+  gpu_context context = NULL;
+  gpu_queue queue = NULL;
+  gpu_kernel kernel = NULL;
+  int err = 0;
+
+  gpu_buffer hash_type_buffer = NULL, hashes_buffer = NULL, hash_len_buffer = NULL, num_hashes_buffer = NULL, charset_buffer = NULL, plaintext_len_min_buffer = NULL, plaintext_len_max_buffer = NULL, table_index_buffer = NULL, chain_len_buffer = NULL, device_num_buffer = NULL, total_devices_buffer = NULL, chunk_positions_buffer = NULL, pos_start_buffer = NULL, output_len_buffer = NULL, output_buffer = NULL, challenge_buffer = NULL;
+
+  /* The Net-NTLMv1 7-byte tables have a specialized kernel; see is_netntlmv1_7.
+   * It takes the same arguments in the same order (ignoring the ones it has no
+   * use for) plus the challenge, so only the kernel name and one extra binding
+   * differ. */
+  char *kernel_path = PRECOMPUTE_BATCH_KERNEL_PATH, *kernel_name = "precompute_batch";
+  int use_netntlmv1_7 = 0;
+
+  size_t chunk_positions = 0, gws = 0;
+  gpu_ulong *output = NULL;
+  gpu_uint output_len = 0, num_chunks = 0, chunk = 0;
+  gpu_uint num_batch = args->num_batch_hashes;
+  size_t total_outputs = 0;
+
+  unsigned char *hash_binaries = NULL;
+  gpu_uint hash_binary_len = 0;
+  unsigned int i = 0;
+
+  /* Concatenate every hash in the batch into one buffer.  They all share the
+   * same length: the table parameters fix the hash type. */
+  {
+    unsigned char one[32] = {0};
+    hash_binary_len = hex_to_bytes(args->batch_hashes[0], sizeof(one), one);
+    if (hash_binary_len == 0) {
+      fprintf(stderr, "Error: could not parse hash %s\n", args->batch_hashes[0]);
+      exit(-1);
+    }
+
+    hash_binaries = calloc((size_t)num_batch * hash_binary_len, 1);
+    if (hash_binaries == NULL) {
+      fprintf(stderr, "Error while allocating buffer for batched hashes.\n");
+      exit(-1);
+    }
+    for (i = 0; i < num_batch; i++) {
+      gpu_uint n = hex_to_bytes(args->batch_hashes[i], sizeof(one), one);
+      if (n != hash_binary_len) {
+        fprintf(stderr, "Error: hash %s has length %u, expected %u\n", args->batch_hashes[i], n, hash_binary_len);
+        exit(-1);
+      }
+      memcpy(hash_binaries + ((size_t)i * hash_binary_len), one, hash_binary_len);
+    }
+  }
+
+  /* The positions are divided among the GPUs.  Round up if it doesn't divide
+   * evenly; this results in slightly more work being done in order to get
+   * complete coverage. */
+  output_len = args->chain_len / args->total_devices;
+  if ((args->chain_len % args->total_devices) != 0)
+    output_len++;
+
+  use_netntlmv1_7 = is_netntlmv1_7(args->hash_type, args->charset_name, args->plaintext_len_min, args->plaintext_len_max, args->chain_len);
+  if (use_netntlmv1_7) {
+    kernel_path = PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH;
+    kernel_name = "precompute_netntlmv1_7_batch";
+    if ((gpu->device_number == 0) && (printed_precompute_optimized_message == 0)) {
+      printf("\nNote: optimized Net-NTLMv1-7 kernel will be used for precomputation.\n\n"); fflush(stdout);
+      printed_precompute_optimized_message = 1;
+    }
+  }
+
+  /* Load the kernel. */
+  gpu->context = CLCREATECONTEXT(context_callback, &(gpu->device));
+  gpu->queue = CLCREATEQUEUE(gpu->context, gpu->device);
+  load_kernel(gpu->context, 1, &(gpu->device), kernel_path, kernel_name, &(gpu->program), &(gpu->kernel), args->hash_type);
+
+  /* These variables are set so the CLCREATEARG* macros work correctly. */
+  context = gpu->context;
+  queue = gpu->queue;
+  kernel = gpu->kernel;
+
+#if defined(USE_CUDA) || defined(USE_METAL)
+  chunk_positions = 256;  /* Fixed launch group size for both non-OpenCL backends. */
+#else
+  if (rc_clGetKernelWorkGroupInfo(kernel, gpu->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &chunk_positions, NULL) != CL_SUCCESS) {
+    fprintf(stderr, "Failed to get preferred work group size!\n");
+    exit(-1);
+  }
+#endif
+  chunk_positions = chunk_positions * gpu->num_work_units;
+
+  if (user_provided_precompute_gws > 0)
+    chunk_positions = user_provided_precompute_gws;
+  if (chunk_positions < 1)
+    chunk_positions = 1;
+  if (chunk_positions > output_len)
+    chunk_positions = output_len;
+
+  num_chunks = output_len / chunk_positions;
+  if ((output_len % chunk_positions) != 0)
+    num_chunks++;
+
+  /* One dispatch covers every hash at chunk_positions consecutive positions. */
+  gws = (size_t)num_batch * chunk_positions;
+
+  total_outputs = (size_t)num_batch * output_len;
+  output = calloc(total_outputs, sizeof(gpu_ulong));
+  if (output == NULL) {
+    fprintf(stderr, "Error while allocating output buffer(s).\n");
+    exit(-1);
+  }
+
+  if (gpu->device_number == 0) {
+    printf("  Precompute batch: %u hash%s x %"PRIu64" positions per dispatch (%u chunk%s, %u compute units)\n",
+           num_batch, (num_batch == 1) ? "" : "es", (uint64_t)chunk_positions,
+           num_chunks, (num_chunks == 1) ? "" : "s", gpu->num_work_units);
+    fflush(stdout);
+  }
+
+  CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
+  CLCREATEARG_ARRAY(1, hashes_buffer, CL_RO, hash_binaries, (size_t)num_batch * hash_binary_len);
+  CLCREATEARG(2, hash_len_buffer, CL_RO, hash_binary_len, sizeof(gpu_uint));
+  CLCREATEARG(3, num_hashes_buffer, CL_RO, num_batch, sizeof(gpu_uint));
+
+  {
+    int charset_len = 0;
+    if (strcmp(args->charset_name, "byte") == 0)
+      charset_len = 256;
+    else
+      charset_len = strlen(args->charset) + 1;
+    CLCREATEARG_ARRAY(4, charset_buffer, CL_RO, args->charset, charset_len);
+  }
+
+  CLCREATEARG(5, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
+  CLCREATEARG(6, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
+  CLCREATEARG(7, table_index_buffer, CL_RO, args->table_index, sizeof(gpu_uint));
+  /* chain_len is a 4-byte unsigned int in thread_args but the kernels declare it
+   * 64-bit, so it must be widened here.  Binding &args->chain_len directly would
+   * read 8 bytes from a 4-byte field and pick up whatever follows it in the
+   * struct as the high word.  The older kernels get away with that only because
+   * they truncate the value back to 32 bits before use. */
+  {
+    gpu_ulong chain_len_64 = args->chain_len;
+    CLCREATEARG(8, chain_len_buffer, CL_RO, chain_len_64, sizeof(gpu_ulong));
+  }
+  CLCREATEARG(9, device_num_buffer, CL_RO, gpu->device_number, sizeof(gpu_uint));
+  CLCREATEARG(10, total_devices_buffer, CL_RO, args->total_devices, sizeof(gpu_uint));
+
+  {
+    gpu_uint cp = (gpu_uint)chunk_positions;
+    CLCREATEARG(11, chunk_positions_buffer, CL_RO, cp, sizeof(gpu_uint));
+  }
+
+  CLCREATEARG(13, output_len_buffer, CL_RO, output_len, sizeof(gpu_uint));
+
+  /* The whole output lives on the device for the duration and is read back once
+   * at the end, since the kernel writes each result at its absolute index. */
+  CLCREATEARG_ARRAY(14, output_buffer, CL_WO, output, total_outputs * sizeof(gpu_ulong));
+
+  if (use_netntlmv1_7)
+    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, netntlmv1_challenge, sizeof(netntlmv1_challenge));
+
+  for (chunk = 0; chunk < num_chunks; chunk++) {
+    gpu_uint pos_start = chunk * (gpu_uint)chunk_positions;
+
+    CLCREATEARG(12, pos_start_buffer, CL_RO, pos_start, sizeof(gpu_uint));
+
+    if (is_amd_gpu) {
+      int barrier_ret = pthread_barrier_wait(&barrier);
+      if ((barrier_ret != 0) && (barrier_ret != PTHREAD_BARRIER_SERIAL_THREAD)) {
+	fprintf(stderr, "pthread_barrier_wait() failed!\n"); fflush(stderr);
+	exit(-1);
+      }
+    }
+
+    /* Run the kernel and wait for it to finish. */
+    CLRUNKERNEL(gpu->queue, gpu->kernel, &gws);
+    CLFLUSH(gpu->queue);
+    CLWAIT(gpu->queue);
+
+    CLFREEBUFFER(pos_start_buffer);
+  }
+
+  /* Read every hash's results back in one transfer. */
+  CLREADBUFFER(output_buffer, total_outputs * sizeof(gpu_ulong), output);
+
+  /* Set the results so the main thread can access them.  num_results is the
+   * per-hash count; results holds num_batch of those back to back. */
+  args->results = output;
+  args->num_results = output_len;
+
+  FREE(hash_binaries);
+
+  CLFREEBUFFER(hash_type_buffer);
+  CLFREEBUFFER(hashes_buffer);
+  CLFREEBUFFER(hash_len_buffer);
+  CLFREEBUFFER(num_hashes_buffer);
+  CLFREEBUFFER(charset_buffer);
+  CLFREEBUFFER(plaintext_len_min_buffer);
+  CLFREEBUFFER(plaintext_len_max_buffer);
+  CLFREEBUFFER(table_index_buffer);
+  CLFREEBUFFER(chain_len_buffer);
+  CLFREEBUFFER(device_num_buffer);
+  CLFREEBUFFER(total_devices_buffer);
+  CLFREEBUFFER(chunk_positions_buffer);
+  CLFREEBUFFER(output_len_buffer);
+  CLFREEBUFFER(output_buffer);
+  CLFREEBUFFER(challenge_buffer);
 
   CLRELEASEKERNEL(gpu->kernel);
   CLRELEASEPROGRAM(gpu->program);
@@ -963,9 +1240,26 @@ void *host_thread_precompute(void *ptr) {
 #endif
   gws = gws * gpu->num_work_units;
 
+  /* Precomputation is dispatched as a series of blocking chunks, so it was a
+   * natural suspect for the same low-occupancy problem the false-alarm path had.
+   * It measured otherwise: sweeping this from 12288 up to a single dispatch
+   * covering the whole output moved the phase by under 20%, non-monotonically,
+   * and the best value at one chain length was the worst at another.  The phase
+   * is compute-bound rather than occupancy-bound, so the historical size stands.
+   * -precompute-gws is kept for per-GPU retuning; tests/bench_precompute.py
+   * sweeps it cheaply by exploiting the quadratic scaling in chain length. */
+  if (user_provided_precompute_gws > 0)
+    gws = user_provided_precompute_gws;
+
+  if (gws < 1) gws = 1;
+
   /* In the event that the global work size is larger than the number of outputs we
    * need, cap the GWS. */
   if (gws > output_len) gws = output_len;
+
+  printf("GPU #%u precompute GWS: %"PRIu64" (%u compute units)\n",
+         gpu->device_number, (uint64_t)gws, gpu->num_work_units);
+  fflush(stdout);
 
   /* Count the number of times we need to run the kernel. */
   num_exec_blocks = output_len / gws;
@@ -1079,7 +1373,23 @@ void *host_thread_precompute(void *ptr) {
 }
 
 
-void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_and_potential_indices **ppi_head) {
+/* Build the precompute cache key for `hash` under the current table parameters.
+ * The key deliberately omits the table part index and chain count, so one
+ * precomputation is valid for every part of a table set. */
+void build_precompute_index_data(char *buf, size_t buf_size, const thread_args *args, const char *hash) {
+  snprintf(buf, buf_size - 1, "%s_%s#%d-%d_%d_%d:%s\n", args->hash_name, args->charset_name, args->plaintext_len_min, args->plaintext_len_max, args->table_index, args->chain_len, hash); /*ntlm_loweralpha#8-8_0_100:49e5bfaab1be72a6c5236f15736a3e15*/
+}
+
+
+/* Turn one hash's GPU results into a cache file and a ppi node.
+ *
+ * `results_ready` selects where the results come from.  0 means the historical
+ * behaviour: check the cache and, on a miss, run the single-hash kernel for this
+ * hash right here.  1 means host_thread_precompute_batch has already produced
+ * results for a whole group of hashes, and this hash's slice starts at
+ * batch_slot within each device's results array -- so no cache lookup and no
+ * dispatch happen, only the collate-and-store half of the work. */
+void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_and_potential_indices **ppi_head, int results_ready, unsigned int batch_slot) {
   pthread_t threads[MAX_NUM_DEVICES] = {0};
   char filename[128] = {0}, time_str[128] = {0}, index_data[256] = {0};
   struct timespec start_time = {0};
@@ -1091,39 +1401,44 @@ void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_an
 
 
   /* Set the index data we're looking for (or will create later). */
-  snprintf(index_data, sizeof(index_data) - 1, "%s_%s#%d-%d_%d_%d:%s\n", args->hash_name, args->charset_name, args->plaintext_len_min, args->plaintext_len_max, args->table_index, args->chain_len, args->hash); /*ntlm_loweralpha#8-8_0_100:49e5bfaab1be72a6c5236f15736a3e15*/
+  build_precompute_index_data(index_data, sizeof(index_data), args, args->hash);
 
   /* Search through the cache and see if we already precomputed the indices for this
-   * hash. */
-  output = search_precompute_cache(index_data, &output_index, filename, sizeof(filename));
+   * hash.  The batch path already established this is a miss. */
+  if (results_ready)
+    output = NULL;
+  else
+    output = search_precompute_cache(index_data, &output_index, filename, sizeof(filename));
 
   /* Cache miss... */
   if (output == NULL) {
-  
-    /* Start the timer for this hash. */
-    start_timer(&start_time);
 
-    /* Start one thread to control each GPU. */
-    for (i = 0; i < num_devices; i++) {
-      if (pthread_create(&(threads[i]), NULL, &host_thread_precompute, &(args[i]))) {
-	perror("Failed to create thread");
-	exit(-1);
+    if (!results_ready) {
+      /* Start the timer for this hash. */
+      start_timer(&start_time);
+
+      /* Start one thread to control each GPU. */
+      for (i = 0; i < num_devices; i++) {
+        if (pthread_create(&(threads[i]), NULL, &host_thread_precompute, &(args[i]))) {
+          perror("Failed to create thread");
+          exit(-1);
+        }
       }
-    }
 
-    /* Wait for all threads to finish. */
-    for (i = 0; i < num_devices; i++) {
-      if (pthread_join(threads[i], NULL) != 0) {
-	perror("Failed to join with thread");
-	exit(-1);
+      /* Wait for all threads to finish. */
+      for (i = 0; i < num_devices; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+          perror("Failed to join with thread");
+          exit(-1);
+        }
       }
+
+      num_hashes_precomputed++;
+
+      seconds_to_human_time(time_str, sizeof(time_str), get_elapsed(&start_time));
+      printf("  Completed in %s.\n", time_str);  fflush(stdout);
+      print_eta_precompute();
     }
-
-    num_hashes_precomputed++;
-
-    seconds_to_human_time(time_str, sizeof(time_str), get_elapsed(&start_time));
-    printf("  Completed in %s.\n", time_str);  fflush(stdout);
-    print_eta_precompute();
 
     /* Create one output array to hold all the results. */
     output = calloc(args[0].num_results * num_devices, sizeof(uint64_t));
@@ -1146,15 +1461,19 @@ void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_an
     */
     for (i = 0; i < args[0].num_results; i++) {
       for (j = 0; j < num_devices; j++) {
-	output[output_index] = args[j].results[i];
+	output[output_index] = args[j].results[((size_t)batch_slot * args[j].num_results) + i];
 	output_index++;
       }
     }
 
-    /* Now that pulled all the GPU results into one array, free them. */
-    for (i = 0; i < num_devices; i++) {
-      FREE(args[i].results);
-      args[i].num_results = 0;
+    /* Now that pulled all the GPU results into one array, free them.  In the
+     * batch case the array is shared by every hash in the group, so the caller
+     * frees it once the whole group has been stored. */
+    if (!results_ready) {
+      for (i = 0; i < num_devices; i++) {
+        FREE(args[i].results);
+        args[i].num_results = 0;
+      }
     }
 
     /* We may have a few extra indices in the array at the end, if the chain length
@@ -1296,12 +1615,217 @@ void precompute_hash(unsigned int num_devices, thread_args *args, precomputed_an
 }
 
 
-void _preloading_thread(char *rt_dir) {
+/* Precompute every hash, batching the GPU work wherever possible.
+ *
+ * Precomputation is O(chain_len^2) per hash and used to be run one hash at a
+ * time, so N hashes cost N times one hash -- for a production chain length that
+ * is tens of minutes each.  The chain walks for different hashes at the same
+ * position are the same length, so they pack into one dispatch with no added
+ * divergence, and N hashes end up costing about the same as one.
+ *
+ * The NTLM8 and NTLM9 tables keep their own optimized single-hash kernels and
+ * so are precomputed one at a time, exactly as before. */
+void precompute_hashes(unsigned int num_devices, thread_args *args, precomputed_and_potential_indices **ppi_head, char **usernames, char **hashes, unsigned int num_hashes) {
+  pthread_t threads[MAX_NUM_DEVICES] = {0};
+  char index_data[256] = {0}, filename[128] = {0}, time_str[128] = {0};
+  struct timespec start_time = {0};
+  unsigned int i = 0, j = 0, group_start = 0, cached_index_count = 0;
+  char **pending_hashes = NULL, **pending_usernames = NULL;
+  unsigned int num_pending = 0;
+  int can_batch = 0;
+
+  /* Only the generic kernel has a batched counterpart. */
+  can_batch = !is_ntlm8(args[0].hash_type, args[0].charset, args[0].plaintext_len_min, args[0].plaintext_len_max, args[0].reduction_offset, args[0].chain_len) &&
+              !is_ntlm9(args[0].hash_type, args[0].charset, args[0].plaintext_len_min, args[0].plaintext_len_max, args[0].reduction_offset, args[0].chain_len);
+
+  if (!can_batch) {
+    for (i = 0; i < num_hashes; i++) {
+      printf("Pre-computing hash #%u: %s...\n", i + 1, hashes[i]);  fflush(stdout);
+      for (j = 0; j < num_devices; j++) {
+        args[j].username = usernames[i];
+        args[j].hash = hashes[i];
+      }
+      precompute_hash(num_devices, args, ppi_head, /*results_ready=*/0, /*batch_slot=*/0);
+    }
+    return;
+  }
+
+  pending_hashes = calloc(num_hashes, sizeof(char *));
+  pending_usernames = calloc(num_hashes, sizeof(char *));
+  if ((pending_hashes == NULL) || (pending_usernames == NULL)) {
+    fprintf(stderr, "Error while allocating buffers for precomputation batching.\n");
+    exit(-1);
+  }
+
+  /* Resolve cache hits first so only hashes that actually need GPU work get
+   * batched.  A hit is nearly free, and mixing them into a group would size the
+   * dispatch for work that is not going to happen. */
+  for (i = 0; i < num_hashes; i++) {
+    uint64_t *cached = NULL;
+
+    for (j = 0; j < num_devices; j++) {
+      args[j].username = usernames[i];
+      args[j].hash = hashes[i];
+    }
+
+    build_precompute_index_data(index_data, sizeof(index_data), &(args[0]), hashes[i]);
+    cached = search_precompute_cache(index_data, &cached_index_count, filename, sizeof(filename));
+
+    if (cached != NULL) {
+      FREE(cached);
+      printf("Pre-computing hash #%u: %s...\n", i + 1, hashes[i]);  fflush(stdout);
+      /* Re-reads the cache and builds the ppi node; the cheap path. */
+      precompute_hash(num_devices, args, ppi_head, /*results_ready=*/0, /*batch_slot=*/0);
+    } else {
+      pending_hashes[num_pending] = hashes[i];
+      pending_usernames[num_pending] = usernames[i];
+      num_pending++;
+    }
+  }
+
+  if (num_pending == 0) {
+    FREE(pending_hashes);
+    FREE(pending_usernames);
+    return;
+  }
+
+  /* Work through the misses in groups.  The group size is bounded because the
+   * output buffer is (group size * positions per device * 8) bytes on each GPU;
+   * at a production chain length that is a few MB per hash. */
+  for (group_start = 0; group_start < num_pending; group_start += PRECOMPUTE_BATCH_MAX) {
+    unsigned int group_size = num_pending - group_start;
+    if (group_size > PRECOMPUTE_BATCH_MAX)
+      group_size = PRECOMPUTE_BATCH_MAX;
+
+    printf("Pre-computing %u hash%s in one batch:\n", group_size, (group_size == 1) ? "" : "es");
+    for (i = 0; i < group_size; i++)
+      printf("  #%u: %s\n", group_start + i + 1, pending_hashes[group_start + i]);
+    fflush(stdout);
+
+    for (j = 0; j < num_devices; j++) {
+      args[j].batch_hashes = &(pending_hashes[group_start]);
+      args[j].num_batch_hashes = group_size;
+      /* Kept in step so any per-hash reporting inside the thread is sane. */
+      args[j].hash = pending_hashes[group_start];
+      args[j].username = pending_usernames[group_start];
+    }
+
+    start_timer(&start_time);
+
+    for (j = 0; j < num_devices; j++) {
+      if (pthread_create(&(threads[j]), NULL, &host_thread_precompute_batch, &(args[j]))) {
+        perror("Failed to create thread");
+        exit(-1);
+      }
+    }
+    for (j = 0; j < num_devices; j++) {
+      if (pthread_join(threads[j], NULL) != 0) {
+        perror("Failed to join with thread");
+        exit(-1);
+      }
+    }
+
+    num_hashes_precomputed += group_size;
+    seconds_to_human_time(time_str, sizeof(time_str), get_elapsed(&start_time));
+    printf("  Completed %u hash%s in %s.\n", group_size, (group_size == 1) ? "" : "es", time_str);
+    fflush(stdout);
+    print_eta_precompute();
+
+    /* Store each hash's slice of the shared results. */
+    for (i = 0; i < group_size; i++) {
+      for (j = 0; j < num_devices; j++) {
+        args[j].username = pending_usernames[group_start + i];
+        args[j].hash = pending_hashes[group_start + i];
+      }
+      precompute_hash(num_devices, args, ppi_head, /*results_ready=*/1, /*batch_slot=*/i);
+    }
+
+    for (j = 0; j < num_devices; j++) {
+      FREE(args[j].results);
+      args[j].num_results = 0;
+      args[j].batch_hashes = NULL;
+      args[j].num_batch_hashes = 0;
+    }
+  }
+
+  FREE(pending_hashes);
+  FREE(pending_usernames);
+}
+
+
+/* --- Parallel table preloading -------------------------------------------
+ *
+ * Table loading used to be one thread walking the directory tree and reading
+ * each table inline, with at most two tables in flight.  On a large table set
+ * that made loading the bottleneck for the entire run: the reader could never
+ * get more than one table ahead, so the GPU sat idle waiting on it.  Measured on
+ * 16 of the 2 GiB Net-NTLMv1 tables, loading accounted for roughly 70 of a 90
+ * second run even with the file data already in the page cache.
+ *
+ * Now the walk and the reading are separated.  The tree is walked once up front
+ * to collect paths (cheap; it only stats), then a pool of workers each claim the
+ * next unclaimed path and read it.  The consumer contract is unchanged --
+ * get_preloaded_table() still pops from preloaded_table_list under
+ * preloaded_tables_lock -- and workers honour the same sliding-window throttle,
+ * so memory use stays bounded.
+ */
+
+/* A table path collected during the directory walk. */
+typedef struct {
+  char **paths;
+  unsigned int num_paths;
+  unsigned int capacity;
+} table_path_list;
+
+/* Shared state for the loader pool. */
+typedef struct {
+  table_path_list *list;
+  unsigned int next_idx;
+  pthread_mutex_t lock;
+} table_load_pool;
+
+/* Published so search_tables() can stop the workers when every hash is cracked
+ * before the tables run out.  Only one lookup is ever in flight. */
+table_load_pool *active_load_pool = NULL;
+
+/* One-way stop flag for the loader pool.  Only ever goes 0 -> 1, so an unlocked
+ * read is safe: the worst case is one extra table being loaded before a worker
+ * notices.  That keeps it readable under either lock without ordering rules. */
+volatile int table_loading_abort = 0;
+
+/* Handle for the preloader, so the consumer can join it before tearing down the
+ * preloaded table list. */
+pthread_t preload_thread_id = {0};
+int preload_thread_running = 0;
+
+
+static void table_path_list_add(table_path_list *list, const char *path) {
+  if (list->num_paths == list->capacity) {
+    unsigned int new_cap = (list->capacity == 0) ? 256 : list->capacity * 2;
+    char **grown = realloc(list->paths, new_cap * sizeof(*grown));
+    if (grown == NULL) {
+      fprintf(stderr, "Failed to allocate table path list.\n");
+      exit(-1);
+    }
+    list->paths = grown;
+    list->capacity = new_cap;
+  }
+  list->paths[list->num_paths] = strdup(path);
+  if (list->paths[list->num_paths] == NULL) {
+    fprintf(stderr, "Failed to allocate table path.\n");
+    exit(-1);
+  }
+  list->num_paths++;
+}
+
+
+/* Recursively collect every rainbow table path under rt_dir.  This only reads
+ * directory metadata, so it is fast even for thousands of tables. */
+static void collect_table_paths(const char *rt_dir, table_path_list *list) {
   DIR *dir = NULL;
   struct dirent *de = NULL;
   struct stat st;
   char filepath[512];
-
 
   memset(&st, 0, sizeof(st));
   memset(filepath, 0, sizeof(filepath));
@@ -1311,131 +1835,240 @@ void _preloading_thread(char *rt_dir) {
     return;
 
   while ((de = readdir(dir)) != NULL) {
-
-    /* Create an absolute path to this entity. */
     filepath_join(filepath, sizeof(filepath), rt_dir, de->d_name);
 
-    /* If this is a directory, recurse into it. */
     if ((strcmp(de->d_name, ".") != 0) && (strcmp(de->d_name, "..") != 0) && (stat(filepath, &st) == 0) && S_ISDIR(st.st_mode)) {
-      _preloading_thread(filepath);
-
-    /* If this is a compressed or uncompressed rainbow table, load it! */
+      collect_table_paths(filepath, list);
     } else if (str_ends_with(de->d_name, ".rt") || str_ends_with(de->d_name, ".rtc") || str_ends_with(de->d_name, ".rt.rar") || str_ends_with(de->d_name, ".rtc.rar")) {
-      gpu_ulong *rainbow_table = NULL;
-      unsigned int num_chains = 0, is_uncompressed_table = 0;
-      struct timespec start_time_io = {0};
-
-
-      if (str_ends_with(de->d_name, ".rt.rar") || str_ends_with(de->d_name, ".rtc.rar")) {
-	int ret = 0;
-
-	start_timer(&start_time_io);
-	if ((ret = rar_decompress(filepath, &rainbow_table, &num_chains)) != 0) {
-	  fprintf(stderr, "Error while decompressing RAR table %s: %d\n", filepath, ret);
-	  exit(-1);
-	}
-	time_io += get_elapsed(&start_time_io);
-      } else if (str_ends_with(de->d_name, ".rtc")) {
-	int ret = 0;
-
-	start_timer(&start_time_io);    /* For loading the table only. */
-	if ((ret = rtc_decompress(filepath, &rainbow_table, &num_chains)) != 0) {
-	  fprintf(stderr, "Error while decompressing RTC table %s: %d\n", filepath, ret);
-	  exit(-1);
-	}
-	time_io += get_elapsed(&start_time_io);
-      } else {
-	FILE *f = NULL;
-
-	is_uncompressed_table = 1;
-	start_timer(&start_time_io);    /* For loading the table only. */
-	f = fopen(filepath, "rb");
-	if (f != NULL) {
-	  long file_size = get_file_size(f);
-
-	  if ((file_size % (sizeof(gpu_ulong) * 2) == 0) && (file_size > 0)) {
-	    unsigned int num_longs = file_size / sizeof(gpu_ulong);
-
-	    rainbow_table = calloc(num_longs, sizeof(gpu_ulong));
-	    if (rainbow_table == NULL) {
-	      fprintf(stderr, "Failed to allocate %"PRIu64" bytes for rainbow table!: %s\n", num_longs * sizeof(gpu_ulong), filepath);
-	      exit(-1);
-	    }
-
-	    if (fread(rainbow_table, sizeof(gpu_ulong), num_longs, f) != num_longs) {
-	      fprintf(stderr, "Error while reading rainbow table: %s\n", strerror(errno));
-	      exit(-1);
-	    }
-
-	    time_io += get_elapsed(&start_time_io);
-	    num_chains = num_longs / 2;
-	  } else
-	    fprintf(stderr, "Rainbow table size is not a multiple of %"PRIu64": %ld\n", sizeof(gpu_ulong) * 2, file_size);
-
-	  FCLOSE(f);
-	} else
-	  fprintf(stderr, "Could not open file for reading: %s", strerror(errno));
-      }
-
-      if (rainbow_table != NULL) {
-	unsigned int skip_table = 0;
-
-
-	/* If the table is uncompressed (*.rt), then there's a possibility its unsorted on accident.  We will
-	 * verify them first to make sure. */
-	if (is_uncompressed_table == 1) {
-	  if (!verify_rainbowtable(rainbow_table, num_chains, VERIFY_TABLE_TYPE_LOOKUP, 0, 0, NULL)) {
-	    fprintf(stderr, "\nError: %s is not a valid table suitable for lookups!  (Hint: it may not be sorted.)  Skipping...\n\n", filepath);  fflush(stderr);
-	    FREE(rainbow_table);
-	    skip_table = 1; /* Skip further processing on this table only. */
-	  }
-	}
-
-	if (!skip_table) {
-	  preloaded_table *pt = calloc(1, sizeof(preloaded_table));
-	  if (pt == NULL) {
-	    printf("Failed to allocate memory for preload_table.\n");
-	    exit(-1);
-	  }
-
-	  /* Set the file path, rainbow table, and number of chains in the newest entry of the preload list. */
-	  pt->filepath = strdup(filepath);
-	  pt->rainbow_table = rainbow_table;
-	  pt->num_chains = num_chains;
-
-	  /* Lock the preloading system, since we're modifying shared structures. */
-	  pthread_mutex_lock(&preloaded_tables_lock);
-
-	  /* Increase the counter of preloaded tables. */
-	  num_preloaded_tables_available++;
-
-	  /* If the list is empty, add the newest entry as the head. */
-	  if (preloaded_table_list == NULL)
-	    preloaded_table_list = pt;
-	  else { /* The list isn't empty, so traverse it to the end, and append this entry. */
-	    preloaded_table *ptr = preloaded_table_list;
-	    while (ptr->next != NULL)
-	      ptr = ptr->next;
-
-	    ptr->next = pt;
-	  }
-
-	  /* Tell the main thread that we have a table available. */
-	  pthread_cond_signal(&condition_wait_for_tables);
-
-	  /* If we preloaded the maximum number of tables, wait for the main thread to consume at least one
-	   * before preloading more. */
-	  while (num_preloaded_tables_available >= MAX_PRELOAD_NUM)
-	    pthread_cond_wait(&condition_continue_loading_tables, &preloaded_tables_lock);
-
-	  /* Release the preloading system lock. */
-	  pthread_mutex_unlock(&preloaded_tables_lock);
-	}
-      }
+      table_path_list_add(list, filepath);
     }
   }
 
   closedir(dir); dir = NULL;
+}
+
+
+/* Read one table off disk.  Returns a preloaded_table on success, or NULL if the
+ * table was unreadable or failed verification (both already reported).
+ * `io_secs` accumulates this thread's read time; the caller folds it into the
+ * global total once, so the threads do not race on it. */
+static preloaded_table *load_one_table(const char *filepath, double *io_secs) {
+  gpu_ulong *rainbow_table = NULL;
+  unsigned int num_chains = 0, is_uncompressed_table = 0;
+  struct timespec start_time_io = {0};
+  preloaded_table *pt = NULL;
+
+  if (str_ends_with(filepath, ".rt.rar") || str_ends_with(filepath, ".rtc.rar")) {
+    int ret = 0;
+
+    start_timer(&start_time_io);
+    if ((ret = rar_decompress((char *)filepath, &rainbow_table, &num_chains)) != 0) {
+      fprintf(stderr, "Error while decompressing RAR table %s: %d\n", filepath, ret);
+      exit(-1);
+    }
+    *io_secs += get_elapsed(&start_time_io);
+  } else if (str_ends_with(filepath, ".rtc")) {
+    int ret = 0;
+
+    start_timer(&start_time_io);    /* For loading the table only. */
+    if ((ret = rtc_decompress((char *)filepath, &rainbow_table, &num_chains)) != 0) {
+      fprintf(stderr, "Error while decompressing RTC table %s: %d\n", filepath, ret);
+      exit(-1);
+    }
+    *io_secs += get_elapsed(&start_time_io);
+  } else {
+    FILE *f = NULL;
+
+    is_uncompressed_table = 1;
+    start_timer(&start_time_io);    /* For loading the table only. */
+    f = fopen(filepath, "rb");
+    if (f != NULL) {
+      long file_size = get_file_size(f);
+
+      if ((file_size % (sizeof(gpu_ulong) * 2) == 0) && (file_size > 0)) {
+        unsigned int num_longs = file_size / sizeof(gpu_ulong);
+
+        /* malloc rather than calloc: every byte is overwritten by the read
+         * below, so zeroing first only doubles the memory traffic. */
+        rainbow_table = malloc((size_t)num_longs * sizeof(gpu_ulong));
+        if (rainbow_table == NULL) {
+          fprintf(stderr, "Failed to allocate %"PRIu64" bytes for rainbow table!: %s\n", (uint64_t)num_longs * sizeof(gpu_ulong), filepath);
+          exit(-1);
+        }
+
+        if (fread(rainbow_table, sizeof(gpu_ulong), num_longs, f) != num_longs) {
+          fprintf(stderr, "Error while reading rainbow table: %s\n", strerror(errno));
+          exit(-1);
+        }
+
+        *io_secs += get_elapsed(&start_time_io);
+        num_chains = num_longs / 2;
+      } else
+        fprintf(stderr, "Rainbow table size is not a multiple of %"PRIu64": %ld\n", sizeof(gpu_ulong) * 2, file_size);
+
+      FCLOSE(f);
+    } else
+      fprintf(stderr, "Could not open file for reading: %s", strerror(errno));
+  }
+
+  if (rainbow_table == NULL)
+    return NULL;
+
+  /* If the table is uncompressed (*.rt), then there's a possibility its unsorted on accident.  We will
+   * verify them first to make sure. */
+  if (is_uncompressed_table == 1) {
+    if (!verify_rainbowtable(rainbow_table, num_chains, VERIFY_TABLE_TYPE_LOOKUP, 0, 0, NULL)) {
+      fprintf(stderr, "\nError: %s is not a valid table suitable for lookups!  (Hint: it may not be sorted.)  Skipping...\n\n", filepath);  fflush(stderr);
+      FREE(rainbow_table);
+      return NULL;
+    }
+  }
+
+  pt = calloc(1, sizeof(preloaded_table));
+  if (pt == NULL) {
+    printf("Failed to allocate memory for preload_table.\n");
+    exit(-1);
+  }
+
+  pt->filepath = strdup(filepath);
+  pt->rainbow_table = rainbow_table;
+  pt->num_chains = num_chains;
+  return pt;
+}
+
+
+/* Loader worker: claim the next path, read it, publish it, repeat. */
+static void *table_load_worker(void *arg) {
+  table_load_pool *pool = (table_load_pool *)arg;
+  double io_secs = 0.0;
+
+  for (;;) {
+    unsigned int idx = 0;
+
+    pthread_mutex_lock(&pool->lock);
+    if (table_loading_abort || (pool->next_idx >= pool->list->num_paths)) {
+      pthread_mutex_unlock(&pool->lock);
+      break;
+    }
+    idx = pool->next_idx++;
+    pthread_mutex_unlock(&pool->lock);
+
+    preloaded_table *pt = load_one_table(pool->list->paths[idx], &io_secs);
+    if (pt == NULL)
+      continue;   /* unreadable or unsorted; already reported */
+
+    pthread_mutex_lock(&preloaded_tables_lock);
+
+    num_preloaded_tables_available++;
+
+    if (preloaded_table_list == NULL)
+      preloaded_table_list = pt;
+    else {
+      preloaded_table *ptr = preloaded_table_list;
+      while (ptr->next != NULL)
+        ptr = ptr->next;
+      ptr->next = pt;
+    }
+
+    /* Tell the main thread that we have a table available. */
+    pthread_cond_signal(&condition_wait_for_tables);
+
+    /* Hold here while the window is full, so memory stays bounded.  Also wakes
+     * on abort, otherwise a consumer that stopped early would leave every worker
+     * parked here forever and the join below would hang. */
+    while ((num_preloaded_tables_available >= max_preload_num) && !table_loading_abort)
+      pthread_cond_wait(&condition_continue_loading_tables, &preloaded_tables_lock);
+
+    pthread_mutex_unlock(&preloaded_tables_lock);
+  }
+
+  /* Fold this worker's read time into the global total once. */
+  pthread_mutex_lock(&preloaded_tables_lock);
+  time_io += io_secs;
+  pthread_mutex_unlock(&preloaded_tables_lock);
+
+  return NULL;
+}
+
+
+/* Stop the loader pool and wait for it to exit.
+ *
+ * The consumer must call this before freeing preloaded_table_list: the workers
+ * append to that list, so tearing it down underneath them would be a use after
+ * free.  Safe to call more than once, and when no pool ever started. */
+void stop_table_loading(void) {
+  table_loading_abort = 1;
+
+  /* Wake any worker parked on the in-flight window. */
+  pthread_mutex_lock(&preloaded_tables_lock);
+  pthread_cond_broadcast(&condition_continue_loading_tables);
+  pthread_mutex_unlock(&preloaded_tables_lock);
+
+  /* Joined without the lock held, since the workers need it to finish. */
+  if (preload_thread_running) {
+    pthread_join(preload_thread_id, NULL);
+    preload_thread_running = 0;
+  }
+}
+
+
+/* Decide how many tables may be in flight and how many threads read them.
+ * Each in-flight table is held whole in memory, so the window is clamped
+ * against total RAM using the largest table's size. */
+static void size_load_pool(const table_path_list *list) {
+  unsigned int threads = 0, window = 0, ram_limit = 0;
+  uint64_t largest = 0;
+  unsigned int i = 0;
+  const char *env = NULL;
+
+  /* Largest table decides how many fit; they are usually all the same size, so
+   * sample rather than stat every one of potentially thousands. */
+  for (i = 0; (i < list->num_paths) && (i < 16); i++) {
+    struct stat st;
+    if (stat(list->paths[i], &st) == 0 && (uint64_t)st.st_size > largest)
+      largest = (uint64_t)st.st_size;
+  }
+
+  threads = get_num_cpu_cores();
+  if (threads > 8) threads = 8;   /* reads stop scaling well past this */
+  if (threads < 1) threads = 1;
+
+  window = threads + 2;
+
+  if (largest > 0) {
+#ifdef __linux__
+    struct sysinfo si;
+    if (sysinfo(&si) == 0) {
+      uint64_t budget = ((uint64_t)si.totalram * si.mem_unit) / PRELOAD_RAM_FRACTION;
+      ram_limit = (unsigned int)(budget / largest);
+    }
+#endif
+    if (ram_limit > 0) {
+      if (window > ram_limit) window = ram_limit;
+      if (threads > window) threads = window;
+    }
+  }
+
+  if (window < MAX_PRELOAD_NUM_DEFAULT) window = MAX_PRELOAD_NUM_DEFAULT;
+  if (threads < 1) threads = 1;
+
+  /* Explicit overrides win over both heuristics. */
+  env = getenv("RCRACK_LOAD_THREADS");
+  if ((env != NULL) && (*env != '\0')) {
+    long v = strtol(env, NULL, 10);
+    if ((v >= 1) && (v <= 256)) threads = (unsigned int)v;
+  }
+  env = getenv("MAX_PRELOAD_NUM");
+  if ((env != NULL) && (*env != '\0')) {
+    long v = strtol(env, NULL, 10);
+    if ((v >= 1) && (v <= 256)) window = (unsigned int)v;
+  }
+
+  /* A window smaller than the worker count just parks workers on the throttle. */
+  if (window < threads) window = threads;
+
+  num_load_threads = threads;
+  max_preload_num = window;
 }
 
 
@@ -1444,7 +2077,10 @@ void _preloading_thread(char *rt_dir) {
 void *preloading_thread(void *ptr) {
   char *xrt_dir = ((preloading_thread_args *)ptr)->rt_dir;
   char rt_dir[512];
-
+  table_path_list list = {0};
+  table_load_pool pool = {0};
+  pthread_t *workers = NULL;
+  unsigned int i = 0;
 
   memset(rt_dir, 0, sizeof(rt_dir));
 
@@ -1452,7 +2088,52 @@ void *preloading_thread(void *ptr) {
   strncpy(rt_dir, xrt_dir, sizeof(rt_dir) - 1);
   free(xrt_dir); xrt_dir = ((preloading_thread_args *)ptr)->rt_dir = NULL;
 
-  _preloading_thread(rt_dir);
+  collect_table_paths(rt_dir, &list);
+  size_load_pool(&list);
+
+  if (list.num_paths > 0) {
+    printf("Loading %u table%s with %u reader thread%s (up to %u in memory at once).\n",
+           list.num_paths, (list.num_paths == 1) ? "" : "s",
+           num_load_threads, (num_load_threads == 1) ? "" : "s",
+           max_preload_num);
+    fflush(stdout);
+  }
+
+  pool.list = &list;
+  pool.next_idx = 0;
+  pthread_mutex_init(&pool.lock, NULL);
+
+  pthread_mutex_lock(&preloaded_tables_lock);
+  active_load_pool = &pool;
+  pthread_mutex_unlock(&preloaded_tables_lock);
+
+  workers = calloc(num_load_threads, sizeof(pthread_t));
+  if (workers == NULL) {
+    fprintf(stderr, "Failed to allocate loader threads.\n");
+    exit(-1);
+  }
+
+  for (i = 0; i < num_load_threads; i++) {
+    if (pthread_create(&(workers[i]), NULL, &table_load_worker, &pool)) {
+      perror("Failed to create table loader thread");
+      exit(-1);
+    }
+  }
+
+  for (i = 0; i < num_load_threads; i++)
+    pthread_join(workers[i], NULL);
+
+  FREE(workers);
+
+  pthread_mutex_lock(&preloaded_tables_lock);
+  active_load_pool = NULL;
+  pthread_mutex_unlock(&preloaded_tables_lock);
+
+  pthread_mutex_destroy(&pool.lock);
+
+  for (i = 0; i < list.num_paths; i++)
+    FREE(list.paths[i]);
+  FREE(list.paths);
 
   /* We've reached the end of all the tables, so tell the main thread. */
   table_loading_complete = 1;
@@ -1508,9 +2189,12 @@ void print_usage_and_exit(char *prog_name, int exit_code) {
   char *dir2 = "/home/user/";
 #endif
 
-  fprintf(stderr, "%sUsage:%s %s rainbow_table_directory (single_hash | filename_with_many_hashes.txt) [-gws GWS] [-disable-platform N]\n\n", WHITEB, CLR, prog_name);
+  fprintf(stderr, "%sUsage:%s %s rainbow_table_directory (single_hash | filename_with_many_hashes.txt) [-gws GWS] [-disable-platform N] [-fa-batch N] [-precompute-batch N] [-precompute-gws N]\n\n", WHITEB, CLR, prog_name);
   fprintf(stderr, "    %s-gws GWS%s    (Optional) Sets the global work size for each GPU.  This can significantly affect the speed.  To tune this setting, start with multiplying the max compute units by the max work group size (both are reported on program start-up).  Then increase/decrease the value and time the results.  For example, if the max compute units is 20, and the max work group size is 1024, try using 20 x 1024 = 20480, then 20480 - 1024 = 19456, 20480 - 2048 = 18432, 2048 + 1024 = 21504, etc.  If you find a value that works better than the automatic setting, please report your findings at: https://github.com/jtesta/rainbowcrackalack/issues\n\n", WHITEB, CLR);
-  fprintf(stderr, "    %s-disable-platform N%s    (Optional) Disables a platform from being used (platform numbers are reported on program start-up).  Useful when experiencing strange problems on mixed-GPU systems.  Try disabling each platform one at a time and see if the program behaves normally.\n\n\n", WHITEB, CLR);
+  fprintf(stderr, "    %s-disable-platform N%s    (Optional) Disables a platform from being used (platform numbers are reported on program start-up).  Useful when experiencing strange problems on mixed-GPU systems.  Try disabling each platform one at a time and see if the program behaves normally.\n\n", WHITEB, CLR);
+  fprintf(stderr, "    %s-fa-batch N%s    (Optional) Number of false alarm candidates to pool across tables before running them on the GPU (default: 16384).  A single table rarely produces enough candidates to keep a GPU busy, so pooling them turns many tiny dispatches into a few large ones.  Raise it if your GPU still looks idle during false alarm checks; set it to 1 to disable pooling entirely.\n\n", WHITEB, CLR);
+  fprintf(stderr, "    %s-precompute-batch N%s    (Optional) How many hashes to pre-compute in a single GPU dispatch (default: %u).  Pre-computation costs roughly chain_len^2 / 2 hash operations per hash and used to run one hash at a time, so N hashes cost N times one hash.  Chain walks for different hashes at the same chain position are the same length, so batching them adds parallelism without adding divergence and N hashes cost about as much as one.  Set to 1 to disable.  Does not apply to the NTLM8/NTLM9 tables, which use their own optimized kernels.\n\n", WHITEB, CLR, (unsigned int)PRECOMPUTE_BATCH_MAX_DEFAULT);
+  fprintf(stderr, "    %s-precompute-gws N%s   (Optional) Global work size for the precomputation phase, per GPU.  The default is one work group per compute unit.  Measured on an RTX 4000 SFF Ada, changing this moves precomputation by under 20%% and not even in a consistent direction, so it is here for retuning a specific GPU rather than because a better value is known.  tests/bench_precompute.py sweeps it without waiting on a full-length run.\n\n\n", WHITEB, CLR);
   fprintf(stderr, "%sExamples:%s\n    %s %s 64f12cddaa88057e06a81b54e73b949b\n    %s %s %shashes_one_per_line.txt\n    %s %s %spwdump.txt\n\n", WHITEB, CLR, prog_name, dir1, prog_name, dir1, dir2, prog_name, dir1, dir2);
   exit(exit_code);
 }
@@ -1828,6 +2512,27 @@ void search_tables(unsigned int total_tables, precomputed_and_potential_indices 
   precomputed_and_potential_indices *ppi_cur = NULL;
   preloaded_table *pt = NULL;
 
+  fa_batch_t fa_batch = {0};
+  gpu_ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
+  gpu_ulong plaintext_space_total = 0;
+  int charset_len = 0;
+
+  /* Every table in a run shares one set of table parameters (find_rt_params
+   * picks them once), so the reduction offset and plaintext space feeding
+   * hash_to_index are constant.  That is what makes it safe to pool candidates
+   * from different tables into a single dispatch. */
+  if (strcmp(args[0].charset_name, "byte") == 0)
+    charset_len = 256;
+  else
+    charset_len = strlen(args[0].charset) + 1;
+
+  plaintext_space_total = fill_plaintext_space_table(charset_len,
+      args[0].plaintext_len_min, args[0].plaintext_len_max, plaintext_space_up_to_index);
+
+  if (fa_batch_init(&fa_batch, fa_batch_threshold, 0) != 0) {
+    fprintf(stderr, "Error while initializing the false alarm batch (out of memory).\n");
+    exit(-1);
+  }
 
   while (1) {
 
@@ -1868,22 +2573,53 @@ void search_tables(unsigned int total_tables, precomputed_and_potential_indices 
     pt->num_chains = 0;
     FREE(pt);
 
-    /* Check endpoint matches. */
-    check_false_alarms(ppi, args);
+    /* Pool this table's endpoint matches instead of dispatching them now.  One
+     * table's worth of candidates is far too little work to fill a GPU, and the
+     * per-dispatch setup gets paid either way. */
+    if (fa_batch_append(&fa_batch, ppi, args[0].reduction_offset, plaintext_space_total) != 0) {
+      fprintf(stderr, "Error while pooling false alarm candidates (out of memory).\n");
+      exit(-1);
+    }
+
+    /* Safe to clear now: fa_batch_append has copied the indices out. */
+    clear_potential_start_indices(ppi);
+
+    if (fa_batch_should_flush(&fa_batch, /*force=*/0)) {
+      check_false_alarms(&fa_batch, args);
+      fa_batch_reset(&fa_batch);
+    }
 
     printf("  Table fully processed in %.1f seconds.\n", get_elapsed(&start_time_table)); fflush(stdout);
     print_eta_search(num_tables_processed, total_tables);
     printf("  Cracked %u of %u hashes.\n\n", num_cracked, num_hashes);
-
-    /* We checked the potential matches above, so there's nothing else to do with
-     * them. */
-    clear_potential_start_indices(ppi);
-
   }
 
-  /* Free any remaining preloaded tables (i.e.: if we cracked all the hashes and quit early). */
-  /* Note: technically, this may not be a complete solution, if this is reached while the preloading
-   * thread is still performing work... */
+  /* Drain whatever is left.  Without this, up to (flush_threshold - 1)
+   * candidates would never be checked and their hashes would be reported
+   * uncracked -- including the run's very last table, which is exactly the case
+   * a small table set hits every time.
+   *
+   * Skipped when every hash is already cracked: the pooled candidates can only
+   * belong to hashes that are now solved, so the dispatch would be pure waste. */
+  num_uncracked = 0;
+  for (ppi_cur = ppi; ppi_cur != NULL; ppi_cur = ppi_cur->next) {
+    if (ppi_cur->plaintext == NULL)
+      num_uncracked++;
+  }
+
+  if ((num_uncracked > 0) && fa_batch_should_flush(&fa_batch, /*force=*/1)) {
+    check_false_alarms(&fa_batch, args);
+    fa_batch_reset(&fa_batch);
+    printf("  Cracked %u of %u hashes.\n\n", num_cracked, num_hashes);
+  }
+  fa_batch_free(&fa_batch);
+
+  /* Stop the loader and wait for it before draining the list.  The workers
+   * append to preloaded_table_list, so freeing it while any of them is still
+   * running would be a use after free -- which is why this joins rather than
+   * just setting a flag. */
+  stop_table_loading();
+
   pthread_mutex_lock(&preloaded_tables_lock);
   while (preloaded_table_list != NULL) {
     preloaded_table *pt_next = preloaded_table_list->next;
@@ -1916,23 +2652,62 @@ int main(int ac, char **av) {
 
   precomputed_and_potential_indices *ppi_head = NULL, *ppi_cur = NULL;
 
-  pthread_t preload_thread_id = {0};
   preloading_thread_args preload_thread_args = {0};
 
 
   ENABLE_CONSOLE_COLOR();
   PRINT_PROJECT_HEADER();
   setlocale(LC_NUMERIC, "");
-  if ((ac < 3) || (ac > 5))
-    print_usage_and_exit(av[0], -1);
-  else if ((ac == 5) && (strcmp(av[3], "-gws") != 0) && (strcmp(av[3], "-disable-platform") != 0))
+  if (ac < 3)
     print_usage_and_exit(av[0], -1);
 
-  if (ac == 5) {
-    if (strcmp(av[3], "-gws") == 0)
-      user_provided_gws = (unsigned int)atoi(av[4]);
-    else if (strcmp(av[3], "-disable-platform") == 0)
-      disable_platform = (unsigned int)atoi(av[4]);
+  /* Optional third positional argument is the pot file (undocumented; used by
+   * the test suite).  Anything starting with '-' from there on is a flag, so
+   * flags can be combined instead of being limited to one, as they used to be. */
+  {
+    int argi = 3;
+
+    if ((argi < ac) && (av[argi][0] != '-'))
+      argi++;  /* pot filename; consumed further below */
+
+    for (; argi < ac; argi += 2) {
+      if (argi + 1 >= ac) {
+        fprintf(stderr, "Error: %s requires a value.\n\n", av[argi]);
+        print_usage_and_exit(av[0], -1);
+      }
+
+      if (strcmp(av[argi], "-gws") == 0)
+        user_provided_gws = (size_t)atoi(av[argi + 1]);
+      else if (strcmp(av[argi], "-disable-platform") == 0)
+        disable_platform = atoi(av[argi + 1]);
+      else if (strcmp(av[argi], "-precompute-gws") == 0) {
+        int v = atoi(av[argi + 1]);
+        if (v < 1) {
+          fprintf(stderr, "Error: -precompute-gws must be at least 1.\n\n");
+          print_usage_and_exit(av[0], -1);
+        }
+        user_provided_precompute_gws = (size_t)v;
+      }
+      else if (strcmp(av[argi], "-precompute-batch") == 0) {
+        int v = atoi(av[argi + 1]);
+        if (v < 1) {
+          fprintf(stderr, "Error: -precompute-batch must be at least 1 (1 disables batching).\n\n");
+          print_usage_and_exit(av[0], -1);
+        }
+        PRECOMPUTE_BATCH_MAX = (unsigned int)v;
+      }
+      else if (strcmp(av[argi], "-fa-batch") == 0) {
+        int v = atoi(av[argi + 1]);
+        if (v < 1) {
+          fprintf(stderr, "Error: -fa-batch must be at least 1 (1 disables batching).\n\n");
+          print_usage_and_exit(av[0], -1);
+        }
+        fa_batch_threshold = (unsigned int)v;
+      } else {
+        fprintf(stderr, "Error: unrecognized option: %s\n\n", av[argi]);
+        print_usage_and_exit(av[0], -1);
+      }
+    }
   }
 
   /* Initialize the devices. */
@@ -1968,12 +2743,13 @@ int main(int ac, char **av) {
 
   /* The default rainbowcrackalack.pot file can be overridden with a third argument.
    * This is undocumented since its probably only useful for automated testing. */
-  if (ac == 4) {
+  if ((ac >= 4) && (av[3][0] != '-')) {
     strncpy(jtr_pot_filename, av[3], sizeof(jtr_pot_filename) - 1);
     jtr_pot_filename[sizeof(jtr_pot_filename) - 1] = '\0';
     strncpy(hashcat_pot_filename, av[3], sizeof(hashcat_pot_filename) - 1);
     hashcat_pot_filename[sizeof(hashcat_pot_filename) - 1] = '\0';
-    strncat(hashcat_pot_filename, ".hashcat", sizeof(hashcat_pot_filename) - 1);
+    strncat(hashcat_pot_filename, ".hashcat",
+            sizeof(hashcat_pot_filename) - strlen(hashcat_pot_filename) - 1);
   }
 
   /* Open the JTR pot file for reading.  We will check the hash(es) to see if any are
@@ -2257,16 +3033,7 @@ int main(int ac, char **av) {
 
   num_hashes_precomputed_total = num_hashes;
   start_timer(&precompute_start_time);
-  for (i = 0; i < num_hashes; i++) {
-    printf("Pre-computing hash #%u: %s...\n", i + 1, hashes[i]);  fflush(stdout);
-
-    for (j = 0; j < num_devices; j++) {
-      args[j].username = usernames[i];
-      args[j].hash = hashes[i];
-    }
-
-    precompute_hash(num_devices, args, &ppi_head);
-  }
+  precompute_hashes(num_devices, args, &ppi_head, usernames, hashes, num_hashes);
   time_precomp = get_elapsed(&precompute_start_time);
   seconds_to_human_time(time_precomp_str, sizeof(time_precomp_str), time_precomp);
   printf("\nPre-computation finished in %s.\n\n", time_precomp_str);  fflush(stdout);
@@ -2279,6 +3046,8 @@ int main(int ac, char **av) {
   /* Start preloading tables into memory. */
   preload_thread_args.rt_dir = strdup(rt_dir);
   err = pthread_create(&preload_thread_id, NULL, preloading_thread, &preload_thread_args);
+  if (err == 0)
+    preload_thread_running = 1;
   if (err != 0) {
     printf("Failed to create thread: %d\n", err);
     return -1;
@@ -2325,7 +3094,7 @@ int main(int ac, char **av) {
     printf(" Results have been written in hashcat format to: %s%s\n\n\n", hashcat_pot_filename, CLR);
   }
 
-  printf(" %s* Time Summary *%s\n\n      Precomputation: %s\n      I/O (parallel): %s\n           Searching: %s\n  False alarm checks: %s\n\n               Total: %s\n\n\n", WHITEB, CLR, time_precomp_str, time_io_str, time_searching_str, time_falsealarms_str, time_total_str);
+  printf(" %s* Time Summary *%s\n\n      Precomputation: %s\n      Table loading: %s (aggregate across %u reader threads)\n           Searching: %s\n  False alarm checks: %s\n\n               Total: %s\n\n\n", WHITEB, CLR, time_precomp_str, time_io_str, num_load_threads, time_searching_str, time_falsealarms_str, time_total_str);
 
   printf(" %s* Statistics *%s\n\n          Number of tables processed: %u\n              Number of false alarms: %" QUOTE PRIu64"\n          Number of chains processed: %" QUOTE PRIu64"\n\n                Time spent per table: %s\n     False alarms checked per second: %" QUOTE ".1f\n\n         False alarms per no. chains: %.5f%%\n  Successful cracks per false alarms: %.5f%%\n  Successful cracks per total chains: %.8f%%\n\n\n", WHITEB, CLR, num_tables_processed, num_falsealarms, num_chains_processed, time_per_table_str, (double)num_falsealarms / time_falsealarms, ((double)num_falsealarms / (double)num_chains_processed) * 100.0, ((double)num_cracked / (double)num_falsealarms) * 100.0, ((double)num_cracked / (double)num_chains_processed) * 100.0);
 
