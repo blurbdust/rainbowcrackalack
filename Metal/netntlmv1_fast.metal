@@ -73,7 +73,7 @@
 inline void netntlmv1_challenge_to_ip(
     thread unsigned char *challenge, thread uint32_t *ip_x, thread uint32_t *ip_y)
 {
-  uint32_t X, Y;
+  uint32_t X, Y, T;
   GET_UINT32_BE(X, challenge, 0);
   GET_UINT32_BE(Y, challenge, 4);
   DES_IP(X, Y);
