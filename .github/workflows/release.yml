@@ -199,10 +199,14 @@ jobs:
       - name: Show architecture
         run: file crackalack_lookup
 
+      # -mf=off disables the executable filter.  Modern 7-Zip auto-applies its
+      # ARM64 filter (method 0A) to arm64 Mach-O, which only 21.07 and newer can
+      # decode, so the binaries silently fail to extract for anyone on an older
+      # 7-Zip.  Costs a little compression, buys universal extraction.
       - name: Bundle
         run: |
           sevenz=$(command -v 7zz || command -v 7z)
-          "$sevenz" a macos-metal-build.7z ${{ env.BINARIES }} Metal shared.h
+          "$sevenz" a -mf=off macos-metal-build.7z ${{ env.BINARIES }} Metal shared.h
 
       - uses: actions/upload-artifact@v4
         with:
