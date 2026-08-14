@@ -71,34 +71,45 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential nvidia-cuda-toolkit libgcrypt20-dev libunrar-dev p7zip-full
 
+      # Explicit candidate directories rather than a find over /usr: the runners
+      # ship an Android NDK whose sysroot got picked up first, which pointed the
+      # build at NDK headers and broke every translation unit.
       - name: Locate the CUDA toolkit
         id: cuda
         run: |
           set -eu
-          cuda_h=$(find /usr -name cuda.h -path '*include*' 2>/dev/null | head -1)
-          nvrtc_h=$(find /usr -name nvrtc.h 2>/dev/null | head -1)
-          nvrtc_so=$(find /usr -name 'libnvrtc.so*' 2>/dev/null | head -1)
-          stub=$(find /usr -name 'libcuda.so' -path '*stubs*' 2>/dev/null | head -1)
+          incdir=""; libdir=""; stubdir=""
 
-          # libcuda.so belongs to the NVIDIA driver, which a runner does not
-          # have.  Without the toolkit's stub there is nothing to link against,
-          # so fail here with something readable rather than at the link step.
-          if [ -z "$cuda_h" ] || [ -z "$nvrtc_h" ] || [ -z "$nvrtc_so" ] || [ -z "$stub" ]; then
-            echo "Could not locate the CUDA pieces this build needs:"
-            echo "  cuda.h:        ${cuda_h:-NOT FOUND}"
-            echo "  nvrtc.h:       ${nvrtc_h:-NOT FOUND}"
-            echo "  libnvrtc.so:   ${nvrtc_so:-NOT FOUND}"
-            echo "  libcuda stub:  ${stub:-NOT FOUND}"
+          for d in /usr/include /usr/local/cuda/include; do
+            [ -f "$d/cuda.h" ] && [ -f "$d/nvrtc.h" ] && { incdir="$d"; break; }
+          done
+          for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64; do
+            ls "$d"/libnvrtc.so* >/dev/null 2>&1 && { libdir="$d"; break; }
+          done
+          # libcuda.so is the driver's, which a runner has no reason to have.
+          # The toolkit ships a stub with SONAME libcuda.so.1 for linking only.
+          for d in /usr/lib/x86_64-linux-gnu/stubs /usr/local/cuda/lib64/stubs \
+                   /usr/lib/x86_64-linux-gnu; do
+            [ -f "$d/libcuda.so" ] && { stubdir="$d"; break; }
+          done
+
+          echo "include: ${incdir:-NOT FOUND}"
+          echo "lib:     ${libdir:-NOT FOUND}"
+          echo "stubs:   ${stubdir:-NOT FOUND}"
+
+          if [ -z "$incdir" ] || [ -z "$libdir" ] || [ -z "$stubdir" ]; then
+            echo
+            echo "Candidates that exist on this runner:"
+            ls -d /usr/include/cuda.h /usr/local/cuda 2>/dev/null || true
+            dpkg -L nvidia-cuda-toolkit 2>/dev/null | grep -E 'cuda\.h$|nvrtc|stubs' | head -20 || true
             exit 1
           fi
 
-          echo "incdir=$(dirname "$cuda_h")"   >> "$GITHUB_OUTPUT"
-          echo "libdir=$(dirname "$nvrtc_so")" >> "$GITHUB_OUTPUT"
-          echo "stubdir=$(dirname "$stub")"    >> "$GITHUB_OUTPUT"
-
-          echo "include: $(dirname "$cuda_h")"
-          echo "lib:     $(dirname "$nvrtc_so")"
-          echo "stubs:   $(dirname "$stub")"
+          {
+            echo "incdir=$incdir"
+            echo "libdir=$libdir"
+            echo "stubdir=$stubdir"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: |
@@ -165,7 +176,10 @@ jobs:
 
   macos-metal:
     name: macOS (Metal, arm64)
-    runs-on: macos-14
+    # macos-15 for the SDK: metal_setup.m references MTLMathModeFast, which is
+    # macOS 15 only.  Its @available check is a runtime guard, so the symbol
+    # still has to exist at compile time and Xcode 15.4 on macos-14 lacks it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
