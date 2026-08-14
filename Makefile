@@ -61,10 +61,20 @@ ifeq ($(BUILD),linux-cuda)
   # The default make linux (OpenCL) path is completely unaffected.
   CC := $(CC_linux)
   EXE :=
-  CUDA_PATH ?= /usr/local/cuda
-  CPPFLAGS := $(CPPFLAGS_common) -DUSE_CUDA -I$(CUDA_PATH)/include
+  # CUDA_INCDIR/LIBDIR/STUBDIR are split out so a distro layout (headers in
+  # /usr/include, libs in /usr/lib/x86_64-linux-gnu) can be used by overriding
+  # them, instead of assuming NVIDIA's /usr/local/cuda prefix.
+  CUDA_PATH   ?= /usr/local/cuda
+  CUDA_INCDIR ?= $(CUDA_PATH)/include
+  CUDA_LIBDIR ?= $(CUDA_PATH)/lib64
+  # libcuda.so belongs to the driver, not the toolkit, so a build host without
+  # an NVIDIA card has nothing to link against.  The toolkit ships a stub with
+  # SONAME libcuda.so.1 for exactly this.  Link path only, never rpath, so at
+  # runtime the real driver is still what gets loaded.
+  CUDA_STUBDIR ?= $(CUDA_LIBDIR)/stubs
+  CPPFLAGS := $(CPPFLAGS_common) -DUSE_CUDA -I$(CUDA_INCDIR)
   CFLAGS   := $(CFLAGS_common)
-  LDFLAGS  := $(LDFLAGS_common) -L$(CUDA_PATH)/lib64 -Wl,-rpath,$(CUDA_PATH)/lib64
+  LDFLAGS  := $(LDFLAGS_common) -L$(CUDA_LIBDIR) -L$(CUDA_STUBDIR) -Wl,-rpath,$(CUDA_LIBDIR)
   LIBS     := -lpthread -ldl -lgcrypt -lcuda -lnvrtc -lm
   GPU_BACKEND_OBJ := $(OBJDIR)/cuda_setup.o
 endif

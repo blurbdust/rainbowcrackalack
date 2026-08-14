@@ -1,0 +1,220 @@
+name: Release
+
+# Builds a bundle per backend and attaches them to a GitHub release.
+#
+# Push a v* tag to cut a release, or run it manually against an existing tag to
+# rebuild the artifacts without publishing.
+#
+# The CUDA and Metal runners have no GPU, so these jobs prove the backends
+# compile and nothing more.  Correctness is covered by ci.yml (pocl) and by
+# running the suites on real hardware.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (artifacts only, no release is published)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  BINARIES: >-
+    crackalack_gen crackalack_lookup crackalack_verify crackalack_unit_tests
+    crackalack_rtc2rt crackalack_rt2rtc get_chain perfectify enumerate_chain
+
+jobs:
+  linux-opencl:
+    name: Linux (OpenCL)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ocl-icd-opencl-dev opencl-headers \
+            libgcrypt20-dev libunrar-dev p7zip-full
+
+      - name: Build
+        run: make linux -j"$(nproc)"
+
+      - name: Bundle
+        run: 7z a linux-opencl-build.7z ${{ env.BINARIES }} CL shared.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-opencl-build
+          path: linux-opencl-build.7z
+
+  linux-cuda:
+    name: Linux (CUDA)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Ubuntu's toolkit rather than NVIDIA's repo: it is much smaller and this
+      # job only needs headers, libnvrtc and the libcuda stub.  Its layout is
+      # not NVIDIA's /usr/local/cuda prefix, which is why the paths get
+      # discovered below and passed to make rather than assumed.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nvidia-cuda-toolkit libgcrypt20-dev libunrar-dev p7zip-full
+
+      - name: Locate the CUDA toolkit
+        id: cuda
+        run: |
+          set -eu
+          cuda_h=$(find /usr -name cuda.h -path '*include*' 2>/dev/null | head -1)
+          nvrtc_h=$(find /usr -name nvrtc.h 2>/dev/null | head -1)
+          nvrtc_so=$(find /usr -name 'libnvrtc.so*' 2>/dev/null | head -1)
+          stub=$(find /usr -name 'libcuda.so' -path '*stubs*' 2>/dev/null | head -1)
+
+          # libcuda.so belongs to the NVIDIA driver, which a runner does not
+          # have.  Without the toolkit's stub there is nothing to link against,
+          # so fail here with something readable rather than at the link step.
+          if [ -z "$cuda_h" ] || [ -z "$nvrtc_h" ] || [ -z "$nvrtc_so" ] || [ -z "$stub" ]; then
+            echo "Could not locate the CUDA pieces this build needs:"
+            echo "  cuda.h:        ${cuda_h:-NOT FOUND}"
+            echo "  nvrtc.h:       ${nvrtc_h:-NOT FOUND}"
+            echo "  libnvrtc.so:   ${nvrtc_so:-NOT FOUND}"
+            echo "  libcuda stub:  ${stub:-NOT FOUND}"
+            exit 1
+          fi
+
+          echo "incdir=$(dirname "$cuda_h")"   >> "$GITHUB_OUTPUT"
+          echo "libdir=$(dirname "$nvrtc_so")" >> "$GITHUB_OUTPUT"
+          echo "stubdir=$(dirname "$stub")"    >> "$GITHUB_OUTPUT"
+
+          echo "include: $(dirname "$cuda_h")"
+          echo "lib:     $(dirname "$nvrtc_so")"
+          echo "stubs:   $(dirname "$stub")"
+
+      - name: Build
+        run: |
+          make linux-cuda -j"$(nproc)" \
+            CUDA_INCDIR='${{ steps.cuda.outputs.incdir }}' \
+            CUDA_LIBDIR='${{ steps.cuda.outputs.libdir }}' \
+            CUDA_STUBDIR='${{ steps.cuda.outputs.stubdir }}'
+
+      # The stub must not end up as a runtime dependency, or every CUDA call
+      # would fail on a real machine.  Linking against it is fine; recording it
+      # in the rpath is not.
+      - name: Check the stub did not leak into the rpath
+        run: |
+          set -eu
+          rpath=$(objdump -p crackalack_lookup | awk '/RUNPATH|RPATH/ {print $2}')
+          echo "runpath: ${rpath:-none}"
+          case "$rpath" in
+            *stubs*) echo "ERROR: stub directory is in the rpath"; exit 1 ;;
+          esac
+
+      - name: Bundle
+        run: 7z a linux-cuda-build.7z ${{ env.BINARIES }} CUDA shared.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cuda-build
+          path: linux-cuda-build.7z
+
+  windows-opencl:
+    name: Windows (OpenCL, cross-built)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Ubuntu has no mingw build of libunrar, so the windows target defaults to
+      # UNRAR=0 and RAR tables report a clear error at runtime.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mingw-w64 opencl-headers libgcrypt-mingw-w64-dev p7zip-full
+
+      - name: Build
+        run: make windows -j"$(nproc)"
+
+      - name: Check every binary was produced
+        run: |
+          set -eu
+          missing=0
+          for exe in ${{ env.BINARIES }}; do
+            if [ ! -f "$exe.exe" ]; then echo "  MISSING $exe.exe"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Bundle
+        run: 7z a windows-opencl-build.7z *.exe *.dll CL shared.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-opencl-build
+          path: windows-opencl-build.7z
+
+  macos-metal:
+    name: macOS (Metal, arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Homebrew's current 7-Zip formula is sevenzip (7zz); p7zip (7z) is the
+      # older one.  Accept either so this does not break on a formula rename.
+      - name: Install dependencies
+        run: |
+          brew install libgcrypt
+          brew install sevenzip || brew install p7zip
+
+      - name: Build
+        run: make macos -j"$(sysctl -n hw.ncpu)"
+
+      # arm64 only.  Intel Macs are not covered by this bundle.
+      - name: Show architecture
+        run: file crackalack_lookup
+
+      - name: Bundle
+        run: |
+          sevenz=$(command -v 7zz || command -v 7z)
+          "$sevenz" a macos-metal-build.7z ${{ env.BINARIES }} Metal shared.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-metal-build
+          path: macos-metal-build.7z
+
+  publish:
+    name: Publish release
+    needs: [linux-opencl, linux-cuda, windows-opencl, macos-metal]
+    runs-on: ubuntu-24.04
+    # Manual runs build and upload artifacts for inspection but never publish.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          ls -la ./*.7z
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG release" \
+            --generate-notes \
+            ./*.7z
