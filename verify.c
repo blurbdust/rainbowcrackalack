@@ -153,7 +153,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     return 0;
   }
 
-  plaintext_space_total = fill_plaintext_space_table(strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table((strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, plaintext_space_up_to_index);
 
   expected_start = (uint64_t)rt_params.num_chains * (uint64_t)rt_params.table_part;
 
@@ -220,7 +220,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
       rc_fread(&actual_end, sizeof(uint64_t), 1, f);
 
       /* Compute the expected end point. */
-      computed_end = generate_rainbow_chain(rt_params.hash_type, charset, strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
+      computed_end = generate_rainbow_chain(rt_params.hash_type, charset, (strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
 
       /* Ensure that the end point in the file matches what we just computed. */
       if (actual_end != computed_end) {
@@ -295,7 +295,9 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     unsigned int i = 0, plaintext_len = sizeof(plaintext), hash_len = sizeof(hash);
 
 
-    if (rt_params.hash_type == HASH_NTLM) {
+    /* The CPU chain path now supports Net-NTLMv1 too (cpu_rt_functions.c), so
+     * generated tables get verified instead of trusted. */
+    if ((rt_params.hash_type == HASH_NTLM) || is_netntlmv1_family(rt_params.hash_type)) {
       for (i = 0; i < num_chains_to_verify; i++) {
 	random_chain = get_random(actual_num_chains);
 	/*printf("  Verifying chain #%"PRIu64"...\n", random_chain);*/
@@ -303,7 +305,10 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 	start = rainbow_table[random_chain * 2];
 	actual_end = rainbow_table[(random_chain * 2) + 1];
 
-	computed_end = generate_rainbow_chain(rt_params.hash_type, charset, strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
+	/* strlen() cannot measure the byte charset, which contains 0x00 and is
+	 * the only 256-character charset -- same strlen()==0 -> 256 rule the
+	 * host uses everywhere else. */
+	computed_end = generate_rainbow_chain(rt_params.hash_type, charset, (strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
 
 	if (actual_end != computed_end) {
           _print_chain_error(random_chain, start, actual_end, computed_end);
@@ -311,7 +316,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 	}
       }
     } else {
-      printf("Note: skipping CPU chain verification since hash type is not NTLM.\n"); fflush(stdout);
+      printf("Note: skipping CPU chain verification; no CPU reference for this hash type.\n"); fflush(stdout);
     }
   }
 

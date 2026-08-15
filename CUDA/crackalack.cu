@@ -30,7 +30,7 @@ extern "C" __global__ void crackalack(
   /* g_strncpy copies all n bytes and does not stop at a NUL, which matters:
    * the 'byte' charset begins with 0x00, so stopping would leave charset_len
    * at 0 and collapse the plaintext space to zero. */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
 
   unsigned long long plaintext_space_up_to_index[MAX_PLAINTEXT_LEN + 1];
   unsigned char plaintext[MAX_PLAINTEXT_LEN];

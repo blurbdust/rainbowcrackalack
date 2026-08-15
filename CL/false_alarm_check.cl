@@ -28,7 +28,7 @@ __kernel void false_alarm_check(
   unsigned int plaintext_len;
   unsigned int hash_len;
 
-  unsigned int charset_len = g_strncpy(charset, g_charset, sizeof(charset));
+  unsigned int charset_len = g_copy_charset(charset, g_charset, sizeof(charset));
   unsigned int hash_type = *g_hash_type;
   unsigned int plaintext_len_min = *g_plaintext_len_min;
   unsigned int plaintext_len_max = *g_plaintext_len_max;

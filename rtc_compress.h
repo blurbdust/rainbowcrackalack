@@ -25,4 +25,7 @@
  * of chains written.  out_num_chains is only valid when the return value is 0. */
 int rtc_compress(const char *rt_filename, const char *rtc_filename, uint64_t *out_num_chains);
 
+int rtc_compress_buffer(uint64_t *buf, uint64_t num_chains, const char *rtc_filename, uint64_t *out_num_chains);
+int rtc_sort_and_compress(uint64_t *buf, uint64_t num_chains, const char *rtc_filename, uint64_t *out_num_chains);
+
 #endif

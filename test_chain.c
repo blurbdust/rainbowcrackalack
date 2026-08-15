@@ -87,6 +87,72 @@ int cpu_test_chain(char *charset, unsigned int plaintext_len_min, unsigned int p
 }
 
 
+/* Net-NTLMv1 chain tests.
+ *
+ * The byte charset contains 0x00, so strlen() cannot measure it: charset_len is
+ * carried explicitly here (crackalack_gen.c uses the same strlen==0 convention).
+ *
+ * Expected endpoints were cross-checked against a fully independent reference:
+ * spec-derived 7->8 DES key expansion plus OpenSSL DES-ECB, agreeing exactly on
+ * every vector below including index 0, the maximum index 2^56-1, and table
+ * indices 0/7/4095. See des_ref.c for the DES itself. */
+struct netntlmv1_chain_test {
+  unsigned int table_index;
+  unsigned int chain_len;
+  uint64_t start;
+  uint64_t end;
+};
+
+struct netntlmv1_chain_test netntlmv1_chain_tests[] = {
+  {0,    64,  0UL,                  55963534099147573UL},
+  {0,    64,  1UL,                  42708409356010991UL},
+  {0,    64,  12345UL,               9082736167378310UL},
+  {0,    64,  999999999UL,          66696806560137605UL},
+  {7,    100, 0UL,                  63369346393454703UL},
+  {7,    100, 42UL,                  4870491669536007UL},
+  {7,    100, 72057594037927935UL,  38738848414920075UL},
+  {4095, 100, 0UL,                   3241771389668366UL},
+  {4095, 100, 42UL,                  4351148028893693UL},
+  {4095, 100, 72057594037927935UL,  45420560595375021UL},
+};
+
+
+/* Test a Net-NTLMv1 chain using the CPU. */
+int cpu_test_chain_netntlmv1(unsigned int table_index, unsigned int chain_len, uint64_t start, uint64_t expected_end) {
+  uint64_t plaintext_space_up_to_index[MAX_PLAINTEXT_LEN] = {0};
+  uint64_t computed_end = 0, plaintext_space_total = 0;
+  unsigned char hash[16] = {0};
+  char plaintext[MAX_PLAINTEXT_LEN] = {0};
+  char charset[256];
+  unsigned int i = 0, hash_len = 8, plaintext_len = 7;
+
+  for (i = 0; i < 256; i++)
+    charset[i] = (char)i;
+
+  plaintext_space_total = fill_plaintext_space_table(256, 7, 7, plaintext_space_up_to_index);
+
+  computed_end = generate_rainbow_chain(HASH_NETNTLMV1, charset, 256, 7, 7, TABLE_INDEX_TO_REDUCTION_OFFSET(table_index), chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
+
+  if (computed_end != expected_end) {
+    fprintf(stderr, "\n\nCPU Net-NTLMv1 error (table_index %u, chain_len %u):\n\tStart:        %"PRIu64"\n\tExpected end: %"PRIu64"\n\tComputed end: %"PRIu64"\n\n", table_index, chain_len, start, expected_end, computed_end);
+    return 0;
+  }
+  return 1;
+}
+
+
+/* Run all CPU-side Net-NTLMv1 chain tests. */
+int test_chain_netntlmv1_cpu(void) {
+  int tests_passed = 1;
+  unsigned int i = 0;
+
+  for (i = 0; i < (sizeof(netntlmv1_chain_tests) / sizeof(struct netntlmv1_chain_test)); i++)
+    tests_passed &= cpu_test_chain_netntlmv1(netntlmv1_chain_tests[i].table_index, netntlmv1_chain_tests[i].chain_len, netntlmv1_chain_tests[i].start, netntlmv1_chain_tests[i].end);
+
+  return tests_passed;
+}
+
+
 /* Test a chain using the GPU. */
 int gpu_test_chain(gpu_device device, gpu_context context, gpu_kernel kernel, char *charset, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int table_index, unsigned int chain_len, uint64_t start, uint64_t expected_end) {
   CLMAKETESTVARS();

@@ -41,6 +41,8 @@
 #include "hash_validate.h"
 #include "misc.h"
 #include "shared.h"
+#include "rtc_compress.h"
+#include <unistd.h>
 #include "terminal_color.h"
 #include "verify.h"
 #include "version.h"
@@ -49,6 +51,7 @@
 #define CRACKALACK_NTLM8_KERNEL_PATH "crackalack_ntlm8.cl"
 #define CRACKALACK_NTLM9_KERNEL_PATH "crackalack_ntlm9.cl"
 #define CRACKALACK_NETNTLMV1_KERNEL_PATH "crackalack_netntlmv1.cl"
+#define CRACKALACK_NETNTLMV1_BS_KERNEL_PATH "crackalack_netntlmv1_bs.cl"
 
 #define VERBOSE 1
 
@@ -217,6 +220,14 @@ void *host_thread(void *ptr) {
 
   gpu_uint pos_start = 0;
 
+  /* The DES plaintext for Net-NTLMv1 is the server challenge.  Passed to the
+   * kernel rather than compiled in, so the same kernel serves the KGS!@#$% (LM)
+   * tables too. */
+  unsigned int use_netntlmv1 = 0;
+  unsigned int chains_per_item = 1;   /* bitsliced kernels do 32 chains per work item */
+  gpu_buffer challenge_buffer = NULL;
+  const unsigned char *challenge = NULL;
+
   if ((strlen(args->charset) == 0) && (args->charset != NULL)) {
     charset_len = 256;
   }
@@ -238,6 +249,28 @@ void *host_thread(void *ptr) {
     kernel_name = "crackalack_ntlm9";
     if (args->gpu.device_number == 0) { /* Only the first thread prints this. */
       printf("%sNote: optimized NTLM9 kernel will be used.%s\n", GREENB, CLR); fflush(stdout);
+    }
+  } else if (is_netntlmv1_family(args->hash_type) && (charset_len == 256) && \
+             (args->plaintext_len_min == 7) && (args->plaintext_len_max == 7)) {
+    /* Net-NTLMv1 7-byte tables over the byte charset.  Deliberately does NOT
+     * constrain chain_len: it is a runtime kernel argument, so any chain length
+     * works.  See CL/crackalack_netntlmv1.cl for what this avoids. */
+    /* Bitsliced by default: 32 chains per work item, ~14x the scalar kernel.
+     * CRACKALACK_NO_BITSLICE=1 forces the scalar one.  Every generated table is
+     * verified against the CPU reference before it is written, so a regression
+     * here fails loudly rather than producing a quietly useless table. */
+    if (getenv("CRACKALACK_NO_BITSLICE") == NULL) {
+      kernel_path = CRACKALACK_NETNTLMV1_BS_KERNEL_PATH;
+      kernel_name = "crackalack_netntlmv1_bs";
+      chains_per_item = 32;
+    } else {
+      kernel_path = CRACKALACK_NETNTLMV1_KERNEL_PATH;
+      kernel_name = "crackalack_netntlmv1";
+    }
+    use_netntlmv1 = 1;
+    challenge = netntlmv1_challenge_for(args->hash_type);
+    if (args->gpu.device_number == 0) {
+      printf("%sNote: optimized Net-NTLMv1 kernel will be used.%s\n", GREENB, CLR); fflush(stdout);
     }
   } else {
     printf("%sWARNING: non-optimized kernel will be used since non-standard options were given!  Generation will be much slower.  (Hint: use \"crackalack_gen ntlm ascii-32-95 8 8 0 422000 67108864 X\" for optimized NTLM8 generation, or \"crackalack_gen ntlm ascii-32-95 9 9 0 803000 67108864 X\" for optimized NTLM9 generation.)%s\n", YELLOWB, CLR); fflush(stdout);
@@ -296,7 +329,9 @@ void *host_thread(void *ptr) {
   }
 #endif
 
-  indices_size = gws;
+  /* The NDRange stays at gws; a bitsliced work item just covers 32 chains, so
+   * the index buffer is that much larger. */
+  indices_size = gws * chains_per_item;
   start_indices = calloc(indices_size, sizeof(gpu_ulong));
   end_indices = calloc(indices_size, sizeof(gpu_ulong));
   if ((start_indices == NULL) || (end_indices == NULL)) {
@@ -333,6 +368,7 @@ void *host_thread(void *ptr) {
     if (thread_complete) {
       CLFREEBUFFER(hash_type_buffer);
       CLFREEBUFFER(charset_buffer);
+      CLFREEBUFFER(challenge_buffer);
       CLFREEBUFFER(plaintext_len_min_buffer);
       CLFREEBUFFER(plaintext_len_max_buffer);
       CLFREEBUFFER(reduction_offset_buffer);
@@ -355,10 +391,19 @@ void *host_thread(void *ptr) {
     if (hash_type_buffer == NULL) {
       CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
       //CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, strlen(args->charset) + 1);
-      CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, charset_len + 1);
+      /* Zero-padded to MAX_CHARSET_LEN: the kernels copy a fixed sizeof(charset)
+       * bytes, so a buffer sized strlen+1 was an out-of-bounds device read. */
+      {
+        static char padded_charset[MAX_CHARSET_LEN];
+        memset(padded_charset, 0, sizeof(padded_charset));
+        memcpy(padded_charset, args->charset, (charset_len < MAX_CHARSET_LEN) ? charset_len : MAX_CHARSET_LEN);
+        CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, padded_charset, sizeof(padded_charset));
+      }
       CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
       CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
       CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(gpu_uint));
+      if (use_netntlmv1)
+        CLCREATEARG_ARRAY(8, challenge_buffer, CL_RO, (void *)challenge, 8);
     }
 
     /* The start_indices parameter must be set each block.  The start indices are loaded into this read/write buffer, and the end indices will be in it when finished. */
@@ -845,6 +890,43 @@ int main(int ac, char **av) {
        * correct.  No need to keep this debugging info. */
       delete_rt_log(filename);
       printf("done!\n");
+
+      /* Optionally emit the compressed .rtc directly, rather than making the
+       * user run crackalack_rt2rtc afterwards.  rtc_compress requires chains in
+       * ascending end-point order and generation produces them in start-index
+       * order, so sort here; doing it in-process saves a full read+write pass
+       * over the table compared with sorting to a file and compressing that.
+       *
+       * The .rt is still written first, because it is the resume point for an
+       * interrupted run -- only a completed table can be compressed. */
+      if (getenv("CRACKALACK_RTC") != NULL) {
+        FILE *f = fopen(filename, "rb");
+        if (f != NULL) {
+          long sz = 0;
+          if ((fseek(f, 0, SEEK_END) == 0) && ((sz = ftell(f)) > 0) && ((sz % 16) == 0)) {
+            uint64_t *chains = malloc((size_t)sz);
+            rewind(f);
+            if ((chains != NULL) && (fread(chains, 1, (size_t)sz, f) == (size_t)sz)) {
+              char rtc_filename[320] = {0};
+              uint64_t written = 0;
+              snprintf(rtc_filename, sizeof(rtc_filename) - 1, "%sc", filename);
+              printf("Compressing to %s... ", rtc_filename); fflush(stdout);
+              if (rtc_sort_and_compress(chains, (uint64_t)sz / 16, rtc_filename, &written) == 0) {
+                FILE *fc = fopen(rtc_filename, "rb");
+                long csz = (fc != NULL) ? get_file_size(fc) : 0;
+                if (fc != NULL) fclose(fc);
+                printf("done (%" PRIu64 " chains, %.1f%% of the .rt size).\n", written,
+                       (sz > 0) ? (100.0 * (double)csz / (double)sz) : 0.0);
+                if (getenv("CRACKALACK_RTC_KEEP") == NULL)
+                  unlink(filename);
+              } else
+                fprintf(stderr, "Compression failed; the .rt has been left in place.\n");
+            }
+            FREE(chains);
+          }
+          fclose(f);
+        }
+      }
     }
   }
 

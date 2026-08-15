@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include "cpu_rt_functions.h"
+#include "des_ref.h"
 #include "shared.h"
 
 #include <gcrypt.h>
@@ -117,12 +118,25 @@ uint64_t generate_rainbow_chain(
   unsigned int pos = 0;
 
 
-  if (hash_type != HASH_NTLM)
-    fprintf(stderr, "\n\tWARNING: only NTLM hashes are currently supported!\n\n");
+  if ((hash_type != HASH_NTLM) && !is_netntlmv1_family(hash_type)) {
+    fprintf(stderr, "\n\tWARNING: only NTLM and Net-NTLMv1 hashes are currently supported!\n\n");
+    return 0;
+  }
+  const unsigned char *challenge = netntlmv1_challenge_for(hash_type);
 
   for (; pos < chain_len - 1; pos++) {
     index_to_plaintext(index, charset, charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index, plaintext, plaintext_len);
-    ntlm_hash(plaintext, *plaintext_len, hash);
+    if (is_netntlmv1_family(hash_type)) {
+      /* The 7-byte plaintext IS the DES key, expanded to 8 bytes with the
+       * standard 7->8 bit spread, then used to encrypt the fixed challenge.
+       * Same two-step the lookup path uses (crackalack_lookup.c). */
+      unsigned char des_key[8] = {0};
+      setup_des_key(plaintext, des_key);
+      netntlmv1_hash_challenge(des_key, 8, hash, challenge);
+      *hash_len = 8;
+    } else {
+      ntlm_hash(plaintext, *plaintext_len, hash);
+    }
     index = hash_to_index(hash, *hash_len, reduction_offset, plaintext_space_total, pos);
   }
   return index;
@@ -302,39 +316,44 @@ void HashNetNTLMv1(
   unsigned char Hash[8])
 {
   */
+void netntlmv1_hash_challenge(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash, const unsigned char *challenge) {
+    /* Was libgcrypt, which REFUSES the 4 weak and 12 semi-weak DES keys:
+     * gcry_cipher_setkey() returned GPG_ERR_WEAK_KEY and left the handle
+     * unusable, and this function then returned early WITHOUT writing `hash`,
+     * silently handing the caller stale stack data. That made the false-alarm
+     * check in crackalack_lookup.c reject genuinely crackable hashes whenever a
+     * candidate expanded to a weak key. des_ref is verified against OpenSSL on
+     * every weak/semi-weak key plus random vectors; see des_ref.c. */
+    if (plaintext_len != 8)
+        return;
+    des_ref_ecb_encrypt(plaintext, challenge, hash);
+}
+
+
 void netntlmv1_hash(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash) {
-    gcry_control(GCRYCTL_DISABLE_SECMEM, 0); // Disable secure memory (optional)
-    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+    netntlmv1_hash_challenge(plaintext, plaintext_len, hash, netntlmv1_challenge_for(HASH_NETNTLMV1));
+}
 
-    gcry_cipher_hd_t handle;
-    gcry_error_t err;
 
-    // Define key and plaintext
-    unsigned char magic[KEY_SIZE] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+/* The 8-byte DES plaintext for the Net-NTLMv1-style hash types.
+ *
+ * Single source of truth: the generation host, the lookup host and the CPU
+ * reference all take the challenge from here, so a table can never be built
+ * with one plaintext and searched with another. */
+const unsigned char *netntlmv1_challenge_for(unsigned int hash_type) {
+  static const unsigned char challenge_default[8] =
+    { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+  static const unsigned char challenge_lm[8] =    /* "KGS!@#$%" */
+    { 0x4b, 0x47, 0x53, 0x21, 0x40, 0x23, 0x24, 0x25 };
 
-    // Open cipher context
-    err = gcry_cipher_open(&handle, GCRY_CIPHER, GCRY_MODE, 0);
-    if (err) {
-        fprintf(stderr, "Failed to open cipher: %s\n", gcry_strerror(err));
-        return;
-    }
+  if (hash_type == HASH_NETNTLMV1_LM)
+    return challenge_lm;
+  return challenge_default;
+}
 
-    // Set the key for encryption
-    err = gcry_cipher_setkey(handle, plaintext, plaintext_len);
-    if (err) {
-        fprintf(stderr, "Failed to set key: %s\n", gcry_strerror(err));
-        gcry_cipher_close(handle);
-        return;
-    }
 
-    // Encrypt the plaintext
-    err = gcry_cipher_encrypt(handle, hash, BLOCK_SIZE, magic, BLOCK_SIZE);
-    if (err) {
-        fprintf(stderr, "Encryption failed: %s\n", gcry_strerror(err));
-        gcry_cipher_close(handle);
-        return;
-    }
-
-    // Clean up
-    gcry_cipher_close(handle);
+/* True for the Net-NTLMv1-style hash types, which share a DES construction and
+ * differ only in that fixed plaintext. */
+unsigned int is_netntlmv1_family(unsigned int hash_type) {
+  return ((hash_type == HASH_NETNTLMV1) || (hash_type == HASH_NETNTLMV1_LM)) ? 1 : 0;
 }

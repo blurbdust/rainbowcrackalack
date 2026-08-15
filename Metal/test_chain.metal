@@ -24,7 +24,7 @@ kernel void test_chain(
 
   /* charset_len derived from a NUL-terminated copy, matching the OpenCL kernel
    * ABI (blurbdust's host binds no explicit charset_len argument). */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
   ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN];
   unsigned char plaintext[MAX_PLAINTEXT_LEN];
   unsigned int plaintext_len = 0;

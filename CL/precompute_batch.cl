@@ -79,7 +79,7 @@ __kernel void precompute_batch(
   unsigned int hash_type = *g_hash_type;
   unsigned int in_hash_len = *g_hash_len;   /* hash_len below is mutated by do_hash */
   unsigned int hash_len = in_hash_len;
-  unsigned int charset_len = g_strncpy(charset, g_charset, sizeof(charset));
+  unsigned int charset_len = g_copy_charset(charset, g_charset, sizeof(charset));
   unsigned int plaintext_len_min = *g_plaintext_len_min;
   unsigned int plaintext_len_max = *g_plaintext_len_max;
   unsigned int reduction_offset = TABLE_INDEX_TO_REDUCTION_OFFSET(*g_table_index);

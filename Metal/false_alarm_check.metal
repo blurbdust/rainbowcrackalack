@@ -34,7 +34,7 @@ kernel void false_alarm_check(
 
   /* charset_len derived from a NUL-terminated copy, matching the OpenCL kernel
    * ABI (blurbdust's host binds no explicit charset_len argument). */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
   unsigned int hash_type = *g_hash_type;
   unsigned int plaintext_len_min = *g_plaintext_len_min;
   unsigned int plaintext_len_max = *g_plaintext_len_max;

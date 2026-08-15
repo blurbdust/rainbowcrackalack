@@ -19,7 +19,7 @@ inline unsigned long hash_netntlmv1_7(unsigned char *plaintext, unsigned char *c
   unsigned char output[8];
 
   plaintext[7] = '\0';
-  netntlmv1_hash(SK, plaintext, output, challenge);
+  netntlmv1_hash_challenge(SK, plaintext, output, challenge);
 
   /* Pack in little-endian order to match the generic hash_to_index byte
    * assembly: ret = hash[7]<<56 | hash[6]<<48 | ... | hash[0]. */

@@ -199,6 +199,7 @@ $(OUTDIR)/$(GEN_PROG): \
 	$(OBJDIR)/charset.o \
 	$(OBJDIR)/clock.o \
 	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/des_ref.o \
 	$(OBJDIR)/crackalack_gen.o \
 	$(OBJDIR)/file_lock.o \
 	$(OBJDIR)/gws.o \
@@ -206,12 +207,14 @@ $(OUTDIR)/$(GEN_PROG): \
 	$(OBJDIR)/misc.o \
 	$(GPU_BACKEND_OBJ) \
 	$(OBJDIR)/rtc_decompress.o \
+	$(OBJDIR)/rtc_compress.o \
 	$(OBJDIR)/verify.o
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 
 $(OUTDIR)/$(UNITTEST_PROG): \
 	$(OBJDIR)/charset.o \
 	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/des_ref.o \
 	$(OBJDIR)/crackalack_unit_tests.o \
 	$(OBJDIR)/hash_validate.o \
 	$(OBJDIR)/misc.o \
@@ -234,6 +237,7 @@ $(OUTDIR)/$(GETCHAIN_PROG): $(OBJDIR)/get_chain.o
 $(OUTDIR)/$(VERIFY_PROG): \
 	$(OBJDIR)/charset.o \
 	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/des_ref.o \
 	$(OBJDIR)/crackalack_verify.o \
 	$(OBJDIR)/file_lock.o \
 	$(OBJDIR)/hash_validate.o \
@@ -256,6 +260,7 @@ $(OUTDIR)/$(LOOKUP_PROG): \
 	$(OBJDIR)/charset.o \
 	$(OBJDIR)/clock.o \
 	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/des_ref.o \
 	$(OBJDIR)/crackalack_lookup.o \
 	$(OBJDIR)/fa_batch.o \
 	$(OBJDIR)/file_lock.o \
@@ -275,6 +280,7 @@ $(OUTDIR)/$(PERFECTIFY): \
 
 $(OUTDIR)/$(ENUMERATE): \
 	$(OBJDIR)/cpu_rt_functions.o \
+	$(OBJDIR)/des_ref.o \
 	$(OBJDIR)/enumerate_chain.o \
 	$(OBJDIR)/test_shared.o
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)

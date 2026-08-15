@@ -3099,6 +3099,38 @@ inline void des_ecb_setkey_56(uint32_t SK[32], generic unsigned char _key[DES_KE
   des_ecb_setkey(SK, key);
 }
 
+/* As netntlmv1_hash(), but for an arbitrary DES plaintext rather than the
+ * compiled-in challenge.  netntlmv1_hash() hardcodes the state AFTER the initial
+ * permutation, which is why it takes no challenge; this derives that state at
+ * runtime via DES_IP so the same code serves any challenge, including the
+ * KGS!@#$% constant used by the LM tables.
+ *
+ * hash_netntlmv1_7() in netntlmv1_7_functions.cl was already calling a 4-argument
+ * netntlmv1_hash() that did not exist, which made that file - and therefore both
+ * specialized Net-NTLMv1 lookup kernels - fail to compile on OpenCL. */
+inline void netntlmv1_hash_challenge(uint32_t SK[32], unsigned char *plaintext, unsigned char *output, unsigned char *challenge) {
+  int i;
+  uint32_t X, Y, T;
+
+  plaintext[7] = '\0';
+  des_ecb_setkey_56(SK, plaintext);
+
+  GET_UINT32_BE(X, challenge, 0);
+  GET_UINT32_BE(Y, challenge, 4);
+  DES_IP(X, Y);
+
+  for (i = 0; i < 8; i++) {
+    DES_ROUND(Y, X);
+    DES_ROUND(X, Y);
+  }
+
+  DES_FP(Y, X);
+
+  PUT_UINT32_BE(Y, output, 0);
+  PUT_UINT32_BE(X, output, 4);
+}
+
+
 inline void netntlmv1_hash(uint32_t SK[32], unsigned char *plaintext, unsigned char *output) {
   int i;
   uint32_t X, Y, T;

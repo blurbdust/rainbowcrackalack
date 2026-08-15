@@ -64,12 +64,11 @@
 #define PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH "precompute_netntlmv1_7_batch.cl"
 #define FALSE_ALARM_NETNTLMV1_7_KERNEL_PATH "false_alarm_check_netntlmv1_7.cl"
 
-/* The Net-NTLMv1 kernels take the server challenge as an argument.  This fork
- * only supports the fixed challenge that its DES code is specialized for (the
- * initial-permutation state in CL/netntlmv1.cl is precomputed for it), so it is
- * supplied as a constant rather than plumbed through from the capture. */
-static const unsigned char netntlmv1_challenge[8] =
-  { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+/* The Net-NTLMv1 kernels take the DES plaintext as an argument, and it is now
+ * selected by hash type via netntlmv1_challenge_for(): the server challenge for
+ * "netntlmv1", or the LM magic constant "KGS!@#$%" for "netntlmv1-lm".  The
+ * kernels derive the initial-permutation state at runtime, so nothing is
+ * specialized for one particular value any more. */
 #define PRECOMPUTE_NTLM8_KERNEL_PATH "precompute_ntlm8.cl"
 #define PRECOMPUTE_NTLM9_KERNEL_PATH "precompute_ntlm9.cl"
 #define PRECOMPUTE_NETNTLMV1_KERNEL_PATH "precompute_netntlmv1.cl"
@@ -356,6 +355,20 @@ void add_potential_start_index_and_position(precomputed_and_potential_indices *p
  * (see fa_batch.h).  `batch` stays untouched here -- the caller resets it after
  * this returns, which is safe because this function does not return until every
  * device thread has been joined and its results consumed. */
+/* Zero-padded charset buffer for the device.
+ *
+ * Every generic kernel copies a fixed MAX_CHARSET_LEN bytes (g_copy_charset) and
+ * derives charset_len from a strlen of that copy, so the buffer must be that
+ * large and NUL-padded.  Sizing it at charset_len left the kernel reading past
+ * the end and depending on the allocator having zeroed it. */
+static const char *padded_charset(const char *charset, unsigned int charset_len) {
+  static char buf[MAX_CHARSET_LEN];
+  memset(buf, 0, sizeof(buf));
+  memcpy(buf, charset, (charset_len < MAX_CHARSET_LEN) ? charset_len : MAX_CHARSET_LEN);
+  return buf;
+}
+
+
 void check_false_alarms(fa_batch_t *batch, thread_args *args) {
   pthread_t threads[MAX_NUM_DEVICES] = {0};
   char time_str[128] = {0};
@@ -386,7 +399,13 @@ void check_false_alarms(fa_batch_t *batch, thread_args *args) {
     charset_len = 256;
   }
   else {
-    charset_len = strlen(args->charset) + 1;
+    /* Bare strlen, NOT strlen+1: this is the radix for the plaintext space, not a
+     * buffer size.  The +1 conflated the two and made every non-'byte' charset
+     * compute its space as 96^n instead of 95^n, so lookups found a candidate in
+     * the endpoint search and then rejected it in the false-alarm check.  The
+     * 'byte' charset is unaffected (both give 256), which is why Net-NTLMv1
+     * tables always worked.  Matches crackalack_gen.c and verify.c. */
+    charset_len = (strlen(args->charset) == 0) ? 256 : strlen(args->charset);
   }
 
   fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
@@ -455,7 +474,7 @@ void check_false_alarms(fa_batch_t *batch, thread_args *args) {
       	    /*printf("Found super false positive!: NTLM('%s') != %s\n", plaintext, ppi_refs[j]->hash);*/
       	    continue;
       	  }
-      	} else if (args[i].hash_type == HASH_NETNTLMV1) {
+      	} else if (is_netntlmv1_family(args[i].hash_type)) {
 
           unsigned char hash[8] = {0};
           char hash_hex[(sizeof(hash) * 2) + 1] = {0};
@@ -480,7 +499,7 @@ void check_false_alarms(fa_batch_t *batch, thread_args *args) {
       	/* Save the plaintext, clear the precomputed end indices list (since its
       	 * no longer useful, save the hash/plaintext combo into the pot file, and
       	 * tell the user. */
-      	if (args[i].hash_type == HASH_NETNTLMV1) {
+      	if (is_netntlmv1_family(args[i].hash_type)) {
       	  ppi_refs[j]->plaintext = calloc(8, 1);
       	  memcpy(ppi_refs[j]->plaintext, plaintext, 7);
       	} else {
@@ -490,7 +509,7 @@ void check_false_alarms(fa_batch_t *batch, thread_args *args) {
       	FREE(ppi_refs[j]->precomputed_end_indices);
 
       	save_cracked_hash(ppi_refs[j], args[i].hash_type);
-        if (args[i].hash_type == HASH_NETNTLMV1) {
+        if (is_netntlmv1_family(args[i].hash_type)) {
           char ptxt_hex[(sizeof(plaintext) * 2) + 1] = {0};
           bytes_to_hex((unsigned char*)plaintext, 7, ptxt_hex, sizeof(ptxt_hex));
 
@@ -741,7 +760,13 @@ void *host_thread_false_alarm(void *ptr) {
     charset_len = 256;
   }
   else {
-    charset_len = strlen(args->charset) + 1;
+    /* Bare strlen, NOT strlen+1: this is the radix for the plaintext space, not a
+     * buffer size.  The +1 conflated the two and made every non-'byte' charset
+     * compute its space as 96^n instead of 95^n, so lookups found a candidate in
+     * the endpoint search and then rejected it in the false-alarm check.  The
+     * 'byte' charset is unaffected (both give 256), which is why Net-NTLMv1
+     * tables always worked.  Matches crackalack_gen.c and verify.c. */
+    charset_len = (strlen(args->charset) == 0) ? 256 : strlen(args->charset);
   }
 
   plaintext_space_total = fill_plaintext_space_table(charset_len, args->plaintext_len_min, args->plaintext_len_max, plaintext_space_up_to_index);
@@ -857,10 +882,18 @@ void *host_thread_false_alarm(void *ptr) {
   }
 
   CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
-  CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, args->charset, charset_len);
+  CLCREATEARG_ARRAY(1, charset_buffer, CL_RO, (void *)padded_charset(args->charset, charset_len), MAX_CHARSET_LEN);
   CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
   CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
   CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(gpu_uint));
+  if (getenv("FA_DEBUG")) {
+    fprintf(stderr, "[FA] charset_len=%d space=%llu n=%u start[0]=%llu pos[0]=%u base[0]=%llu\n",
+            charset_len, (unsigned long long)plaintext_space_total,
+            args->num_potential_start_indices,
+            (unsigned long long)args->potential_start_indices[0],
+            args->potential_start_index_positions[0],
+            (unsigned long long)args->hash_base_indices[0]);
+  }
   CLCREATEARG(5, plaintext_space_total_buffer, CL_RO, plaintext_space_total, sizeof(gpu_ulong));
   CLCREATEARG_ARRAY(6, plaintext_space_up_to_index_buffer, CL_RO, plaintext_space_up_to_index, MAX_PLAINTEXT_LEN * sizeof(gpu_ulong));
   CLCREATEARG(7, device_num_buffer, CL_RO, gpu->device_number, sizeof(gpu_uint));
@@ -872,7 +905,7 @@ void *host_thread_false_alarm(void *ptr) {
   CLCREATEARG_ARRAY(14, output_block_buffer, CL_WO, output_block, output_block_len * sizeof(gpu_ulong));
 
   if (use_netntlmv1_7)
-    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, netntlmv1_challenge, sizeof(netntlmv1_challenge));
+    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, (void *)netntlmv1_challenge_for(args->hash_type), 8);
 
   for (exec_block = 0; exec_block < num_exec_blocks; exec_block++) {
     unsigned int exec_block_scaler = exec_block * gws;
@@ -1076,8 +1109,14 @@ void *host_thread_precompute_batch(void *ptr) {
     if (strcmp(args->charset_name, "byte") == 0)
       charset_len = 256;
     else
-      charset_len = strlen(args->charset) + 1;
-    CLCREATEARG_ARRAY(4, charset_buffer, CL_RO, args->charset, charset_len);
+      /* Bare strlen, NOT strlen+1: this is the radix for the plaintext space, not a
+     * buffer size.  The +1 conflated the two and made every non-'byte' charset
+     * compute its space as 96^n instead of 95^n, so lookups found a candidate in
+     * the endpoint search and then rejected it in the false-alarm check.  The
+     * 'byte' charset is unaffected (both give 256), which is why Net-NTLMv1
+     * tables always worked.  Matches crackalack_gen.c and verify.c. */
+    charset_len = (strlen(args->charset) == 0) ? 256 : strlen(args->charset);
+    CLCREATEARG_ARRAY(4, charset_buffer, CL_RO, (void *)padded_charset(args->charset, charset_len), MAX_CHARSET_LEN);
   }
 
   CLCREATEARG(5, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
@@ -1107,7 +1146,7 @@ void *host_thread_precompute_batch(void *ptr) {
   CLCREATEARG_ARRAY(14, output_buffer, CL_WO, output, total_outputs * sizeof(gpu_ulong));
 
   if (use_netntlmv1_7)
-    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, netntlmv1_challenge, sizeof(netntlmv1_challenge));
+    CLCREATEARG_ARRAY(15, challenge_buffer, CL_RO, (void *)netntlmv1_challenge_for(args->hash_type), 8);
 
   for (chunk = 0; chunk < num_chunks; chunk++) {
     gpu_uint pos_start = chunk * (gpu_uint)chunk_positions;
@@ -1288,14 +1327,20 @@ void *host_thread_precompute(void *ptr) {
     charset_len = 256;
   }
   else {
-    charset_len = strlen(args->charset) + 1;
+    /* Bare strlen, NOT strlen+1: this is the radix for the plaintext space, not a
+     * buffer size.  The +1 conflated the two and made every non-'byte' charset
+     * compute its space as 96^n instead of 95^n, so lookups found a candidate in
+     * the endpoint search and then rejected it in the false-alarm check.  The
+     * 'byte' charset is unaffected (both give 256), which is why Net-NTLMv1
+     * tables always worked.  Matches crackalack_gen.c and verify.c. */
+    charset_len = (strlen(args->charset) == 0) ? 256 : strlen(args->charset);
   }
 
 
   CLCREATEARG(0, hash_type_buffer, CL_RO, args->hash_type, sizeof(gpu_uint));
   CLCREATEARG_ARRAY(1, hash_buffer, CL_RO, hash_binary, hash_binary_len);
   CLCREATEARG(2, hash_len_buffer, CL_RO, hash_binary_len, sizeof(gpu_uint));
-  CLCREATEARG_ARRAY(3, charset_buffer, CL_RO, args->charset, charset_len);
+  CLCREATEARG_ARRAY(3, charset_buffer, CL_RO, (void *)padded_charset(args->charset, charset_len), MAX_CHARSET_LEN);
   CLCREATEARG(4, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
   CLCREATEARG(5, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
   CLCREATEARG(6, table_index_buffer, CL_RO, args->table_index, sizeof(gpu_uint));
@@ -2308,7 +2353,7 @@ void rt_binary_search(gpu_ulong *rainbow_table, unsigned int num_chains, precomp
 void save_cracked_hash(precomputed_and_potential_indices *ppi, unsigned int hash_type) {
   FILE *jtr_file = fopen(jtr_pot_filename, "ab"), *hashcat_file = fopen(hashcat_pot_filename, "ab");
   unsigned int hash_len = 0, plaintext_len = 0;
-  if (hash_type == HASH_NETNTLMV1) {
+  if (is_netntlmv1_family(hash_type)) {
     hash_len = strlen(ppi->hash);
     plaintext_len = 7;
   }
@@ -2525,7 +2570,7 @@ void search_tables(unsigned int total_tables, precomputed_and_potential_indices 
   if (strcmp(args[0].charset_name, "byte") == 0)
     charset_len = 256;
   else
-    charset_len = strlen(args[0].charset) + 1;
+    charset_len = strlen(args[0].charset)   /* NOT +1: radix, not a buffer size */;
 
   plaintext_space_total = fill_plaintext_space_table(charset_len,
       args[0].plaintext_len_min, args[0].plaintext_len_max, plaintext_space_up_to_index);
@@ -3079,7 +3124,7 @@ int main(int ac, char **av) {
     ppi_cur = ppi_head;
     while(ppi_cur != NULL) {
       if (ppi_cur->plaintext != NULL) {
-        if (rt_params.hash_type == HASH_NETNTLMV1) {
+        if (is_netntlmv1_family(rt_params.hash_type)) {
           char ptxt_hex[15] = {0};
           bytes_to_hex((unsigned char*)ppi_cur->plaintext, 7, ptxt_hex, sizeof(ptxt_hex));
 	  printf(" %s  %s\n", (ppi_cur->username != NULL) ? ppi_cur->username : ppi_cur->hash, ptxt_hex);

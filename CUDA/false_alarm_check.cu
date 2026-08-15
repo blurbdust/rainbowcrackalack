@@ -40,7 +40,7 @@ extern "C" __global__ void false_alarm_check(
   /* g_strncpy copies all n bytes and does not stop at a NUL, which matters:
    * the 'byte' charset begins with 0x00, so stopping would leave charset_len
    * at 0 and collapse the plaintext space to zero. */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
   unsigned int hash_type = *g_hash_type;
   unsigned int plaintext_len_min = *g_plaintext_len_min;
   unsigned int plaintext_len_max = *g_plaintext_len_max;

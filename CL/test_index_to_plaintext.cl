@@ -21,7 +21,7 @@ __kernel void test_index_to_plaintext(
   unsigned char plaintext[MAX_PLAINTEXT_LEN];
   unsigned int plaintext_len = *g_plaintext_len;
 
-  unsigned int charset_len = g_strncpy(charset, g_charset, sizeof(charset));
+  unsigned int charset_len = g_copy_charset(charset, g_charset, sizeof(charset));
 
   fill_plaintext_space_table(charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index);
 

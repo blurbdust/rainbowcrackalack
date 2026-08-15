@@ -40,56 +40,13 @@ static unsigned int round_up_to_8(unsigned int b) {
 /* Compresses an RT file to RTC format.  Returns 0 on success, negative on error.
  * On success, if out_num_chains is not NULL, *out_num_chains is set to the number
  * of chains written.  out_num_chains is only valid when the return value is 0. */
-int rtc_compress(const char *rt_filename, const char *rtc_filename, uint64_t *out_num_chains) {
-  FILE *f_in = NULL, *f_out = NULL;
-  uint64_t *buf = NULL;
+/* Compress chains already in memory, laid out as start,end pairs and sorted by
+ * end point ascending.  Lets a caller that already holds the table skip writing
+ * an intermediate file and reading it straight back.  buf is NOT freed here. */
+int rtc_compress_buffer(uint64_t *buf, uint64_t num_chains, const char *rtc_filename, uint64_t *out_num_chains) {
+  FILE *f_out = NULL;
   uint8_t *chain_buf = NULL;
   int ret = 0;
-
-  /* Open and read the entire .rt file. */
-  f_in = fopen(rt_filename, "rb");
-  if (f_in == NULL) {
-    fprintf(stderr, "Error: failed to open RT file %s: %s\n", rt_filename, strerror(errno));
-    ret = -1;
-    goto done;
-  }
-
-  if (fseek(f_in, 0, SEEK_END) != 0) {
-    fprintf(stderr, "Error: fseek failed on %s: %s\n", rt_filename, strerror(errno));
-    ret = -2;
-    goto done;
-  }
-  long filesize = ftell(f_in);
-  if (filesize < 0) {
-    fprintf(stderr, "Error: ftell failed on %s: %s\n", rt_filename, strerror(errno));
-    ret = -2;
-    goto done;
-  }
-  rewind(f_in);
-
-  if (filesize == 0 || (filesize % 16) != 0) {
-    fprintf(stderr, "Error: RT file size (%ld) is not a multiple of 16.\n", filesize);
-    ret = -3;
-    goto done;
-  }
-
-  uint64_t num_chains = (uint64_t)filesize / 16;
-
-  buf = malloc((size_t)filesize);
-  if (buf == NULL) {
-    fprintf(stderr, "Error: could not allocate %ld bytes for RT file.\n", filesize);
-    ret = -4;
-    goto done;
-  }
-
-  if (fread(buf, 1, (size_t)filesize, f_in) != (size_t)filesize) {
-    fprintf(stderr, "Error while reading RT file: %s\n", strerror(errno));
-    ret = -5;
-    goto done;
-  }
-
-  fclose(f_in);
-  f_in = NULL;
 
   /* start[i] = buf[i*2], end[i] = buf[i*2+1] */
   uint64_t *start = buf;       /* start[i] = buf[i*2]   */
@@ -219,22 +176,72 @@ int rtc_compress(const char *rt_filename, const char *rtc_filename, uint64_t *ou
     *out_num_chains = num_chains;
 
 done:
-  if (f_in != NULL) {
-    fclose(f_in);
-    f_in = NULL;
-  }
   if (f_out != NULL) {
     fclose(f_out);
     f_out = NULL;
-  }
-  if (buf != NULL) {
-    free(buf);
-    buf = NULL;
   }
   if (chain_buf != NULL) {
     free(chain_buf);
     chain_buf = NULL;
   }
 
+  return ret;
+}
+
+
+/* Sort by end point, then compress.  rtc_compress_buffer() requires ascending
+ * end points, but generation produces chains in start-index order. */
+static int rtc_cmp_end(const void *a, const void *b) {
+  uint64_t ea = ((const uint64_t *)a)[1], eb = ((const uint64_t *)b)[1];
+  return (ea < eb) ? -1 : ((ea > eb) ? 1 : 0);
+}
+
+
+int rtc_sort_and_compress(uint64_t *buf, uint64_t num_chains, const char *rtc_filename, uint64_t *out_num_chains) {
+  qsort(buf, (size_t)num_chains, 2 * sizeof(uint64_t), rtc_cmp_end);
+  return rtc_compress_buffer(buf, num_chains, rtc_filename, out_num_chains);
+}
+
+
+/* Read an .rt file and compress it.  Unchanged behaviour: input must already be
+ * sorted by end point. */
+int rtc_compress(const char *rt_filename, const char *rtc_filename, uint64_t *out_num_chains) {
+  FILE *f_in = fopen(rt_filename, "rb");
+  uint64_t *buf = NULL;
+  long filesize = 0;
+  int ret = 0;
+
+  if (f_in == NULL) {
+    fprintf(stderr, "Error: failed to open RT file %s: %s\n", rt_filename, strerror(errno));
+    return -1;
+  }
+  if ((fseek(f_in, 0, SEEK_END) != 0) || ((filesize = ftell(f_in)) < 0)) {
+    fprintf(stderr, "Error: seek failed on %s: %s\n", rt_filename, strerror(errno));
+    fclose(f_in);
+    return -2;
+  }
+  rewind(f_in);
+
+  if ((filesize == 0) || ((filesize % 16) != 0)) {
+    fprintf(stderr, "Error: RT file size (%ld) is not a multiple of 16.\n", filesize);
+    fclose(f_in);
+    return -3;
+  }
+  buf = malloc((size_t)filesize);
+  if (buf == NULL) {
+    fprintf(stderr, "Error: could not allocate %ld bytes for RT file.\n", filesize);
+    fclose(f_in);
+    return -4;
+  }
+  if (fread(buf, 1, (size_t)filesize, f_in) != (size_t)filesize) {
+    fprintf(stderr, "Error while reading RT file: %s\n", strerror(errno));
+    fclose(f_in);
+    free(buf);
+    return -5;
+  }
+  fclose(f_in);
+
+  ret = rtc_compress_buffer(buf, (uint64_t)filesize / 16, rtc_filename, out_num_chains);
+  free(buf);
   return ret;
 }

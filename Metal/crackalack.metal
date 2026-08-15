@@ -28,7 +28,7 @@ kernel void crackalack(
   /* charset_len derived from a NUL-terminated copy, and the plaintext-space
    * table computed in-kernel, matching the OpenCL kernel ABI (blurbdust's host
    * binds 8 args and no explicit charset_len / plaintext_space arguments). */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
 
   ulong plaintext_space_up_to_index[MAX_PLAINTEXT_LEN];
   unsigned char plaintext[MAX_PLAINTEXT_LEN];

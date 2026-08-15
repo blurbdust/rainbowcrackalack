@@ -9,6 +9,11 @@
 #define HASH_MD5 3
 #define HASH_SHA1 4
 #define HASH_NETNTLMV1 9
+/* Same DES construction as HASH_NETNTLMV1, but the fixed plaintext is the LM
+ * magic constant "KGS!@#$%" instead of a server challenge.  A full 2^56 table
+ * over this therefore inverts any LM hash half directly, whatever charset the
+ * password used. */
+#define HASH_NETNTLMV1_LM 10
 
 #define MAX_PLAINTEXT_LEN 16
 #define MAX_HASH_OUTPUT_LEN 16
