@@ -23,6 +23,12 @@
 #ifndef _DES_BITSLICE_CU
 #define _DES_BITSLICE_CU
 
+/* NVRTC compiles these standalone and does not define the OpenCL spelling of uint. */
+#ifndef __CUDA_UINT_DEFINED
+#define __CUDA_UINT_DEFINED
+typedef unsigned int uint;
+#endif
+
 /*
  * Bitslice DES S-boxes for x86 with MMX/SSE2/AVX and for typical RISC
  * architectures.  These use AND, OR, XOR, NOT, and AND-NOT gates.
