@@ -370,6 +370,23 @@ static const char *padded_charset(const char *charset, unsigned int charset_len)
 }
 
 
+/* Command-line flags; see parse_flags(). */
+unsigned int opt_no_bitslice = 0, opt_fa_debug = 0;
+
+static void parse_flags(int *ac, char **av) {
+  int w = 1, r = 0;
+  for (r = 1; r < *ac; r++) {
+    if ((strcmp(av[r], "--no-bitslice") == 0) || (strcmp(av[r], "-no-bitslice") == 0))
+      opt_no_bitslice = 1;
+    else if ((strcmp(av[r], "--fa-debug") == 0) || (strcmp(av[r], "-fa-debug") == 0))
+      opt_fa_debug = 1;
+    else
+      av[w++] = av[r];
+  }
+  *ac = w;
+}
+
+
 void check_false_alarms(fa_batch_t *batch, thread_args *args) {
   pthread_t threads[MAX_NUM_DEVICES] = {0};
   char time_str[128] = {0};
@@ -887,7 +904,7 @@ void *host_thread_false_alarm(void *ptr) {
   CLCREATEARG(2, plaintext_len_min_buffer, CL_RO, args->plaintext_len_min, sizeof(gpu_uint));
   CLCREATEARG(3, plaintext_len_max_buffer, CL_RO, args->plaintext_len_max, sizeof(gpu_uint));
   CLCREATEARG(4, reduction_offset_buffer, CL_RO, args->reduction_offset, sizeof(gpu_uint));
-  if (getenv("FA_DEBUG")) {
+  if (opt_fa_debug) {
     fprintf(stderr, "[FA] charset_len=%d space=%llu n=%u start[0]=%llu pos[0]=%u base[0]=%llu\n",
             charset_len, (unsigned long long)plaintext_space_total,
             args->num_potential_start_indices,
@@ -1048,7 +1065,7 @@ void *host_thread_precompute_batch(void *ptr) {
     /* Precomputation dominates lookup cost: it walks every chain position to the
      * end, so the work is chain_len^2 / 2.  Bitsliced, 32 positions ride in one
      * work item.  CRACKALACK_NO_BITSLICE=1 falls back to the scalar kernel. */
-    if (getenv("CRACKALACK_NO_BITSLICE") == NULL) {
+    if (!opt_no_bitslice) {
       kernel_path = PRECOMPUTE_NETNTLMV1_7_BS_KERNEL_PATH;
       kernel_name = "precompute_netntlmv1_7_bs";
       precompute_slots_per_item = 32;
@@ -2252,7 +2269,7 @@ void print_usage_and_exit(char *prog_name, int exit_code) {
   char *dir2 = "/home/user/";
 #endif
 
-  fprintf(stderr, "%sUsage:%s %s rainbow_table_directory (single_hash | filename_with_many_hashes.txt) [-gws GWS] [-disable-platform N] [-fa-batch N] [-precompute-batch N] [-precompute-gws N]\n\n", WHITEB, CLR, prog_name);
+  fprintf(stderr, "%sUsage:%s %s rainbow_table_directory (single_hash | filename_with_many_hashes.txt) [-gws GWS] [-disable-platform N] [-fa-batch N] [-precompute-batch N] [-precompute-gws N] [--no-bitslice] [--fa-debug]\n\n  --no-bitslice  use the scalar precompute kernel instead of the bitsliced one\n  --fa-debug     print false-alarm batch diagnostics\n\n", WHITEB, CLR, prog_name);
   fprintf(stderr, "    %s-gws GWS%s    (Optional) Sets the global work size for each GPU.  This can significantly affect the speed.  To tune this setting, start with multiplying the max compute units by the max work group size (both are reported on program start-up).  Then increase/decrease the value and time the results.  For example, if the max compute units is 20, and the max work group size is 1024, try using 20 x 1024 = 20480, then 20480 - 1024 = 19456, 20480 - 2048 = 18432, 2048 + 1024 = 21504, etc.  If you find a value that works better than the automatic setting, please report your findings at: https://github.com/jtesta/rainbowcrackalack/issues\n\n", WHITEB, CLR);
   fprintf(stderr, "    %s-disable-platform N%s    (Optional) Disables a platform from being used (platform numbers are reported on program start-up).  Useful when experiencing strange problems on mixed-GPU systems.  Try disabling each platform one at a time and see if the program behaves normally.\n\n", WHITEB, CLR);
   fprintf(stderr, "    %s-fa-batch N%s    (Optional) Number of false alarm candidates to pool across tables before running them on the GPU (default: 16384).  A single table rarely produces enough candidates to keep a GPU busy, so pooling them turns many tiny dispatches into a few large ones.  Raise it if your GPU still looks idle during false alarm checks; set it to 1 to disable pooling entirely.\n\n", WHITEB, CLR);
@@ -2699,6 +2716,8 @@ void search_tables(unsigned int total_tables, precomputed_and_potential_indices 
 
 
 int main(int ac, char **av) {
+  parse_flags(&ac, av);
+
   char *rt_dir = NULL, *single_hash = NULL, *filename = NULL, *file_data = NULL, **usernames = NULL, **hashes = NULL, *line = NULL, *pot_file_data = NULL;
   unsigned int i = 0, j = 0, max_num_hashes = 0, num_colons = 0, file_format = 0, err = 0;
   FILE *f = NULL;

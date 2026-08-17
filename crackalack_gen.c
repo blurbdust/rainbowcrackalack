@@ -155,9 +155,29 @@ unsigned int is_amd_gpu = 0;
 /* The global work size, as over-ridden by the user on the command line. */
 size_t user_provided_gws = 0;
 
+/* Command-line flags.  Accepted anywhere on the line and stripped before the
+ * positional arguments are parsed, so they compose with the existing fixed-
+ * position parsing (including -gws, which must stay where it is). */
+unsigned int opt_rtc = 0, opt_keep_rt = 0, opt_no_bitslice = 0;
+
+static void parse_flags(int *ac, char **av) {
+  int w = 1, r = 0;
+  for (r = 1; r < *ac; r++) {
+    if ((strcmp(av[r], "--rtc") == 0) || (strcmp(av[r], "-rtc") == 0))
+      opt_rtc = 1;
+    else if ((strcmp(av[r], "--keep-rt") == 0) || (strcmp(av[r], "-keep-rt") == 0))
+      opt_keep_rt = 1;
+    else if ((strcmp(av[r], "--no-bitslice") == 0) || (strcmp(av[r], "-no-bitslice") == 0))
+      opt_no_bitslice = 1;
+    else
+      av[w++] = av[r];
+  }
+  *ac = w;
+}
+
 
 void print_usage_and_exit(char *prog_name, int exit_code) {
-  fprintf(stderr, "Usage: %s hash_algorithm charset_name plaintext_min_length plaintext_max_length table_index chain_length number_of_chains [part_index | -bench] [-gws GWS]\n\nExample: %s ntlm ascii-32-95 9 9 0 803000 67108864 0\n\n", prog_name, prog_name);
+  fprintf(stderr, "Usage: %s hash_algorithm charset_name plaintext_min_length plaintext_max_length table_index chain_length number_of_chains [part_index | -bench] [-gws GWS] [--rtc] [--keep-rt] [--no-bitslice]\n\n  --rtc          write the compressed .rtc directly and remove the .rt\n  --keep-rt      with --rtc, keep the .rt as well\n  --no-bitslice  use the scalar kernel instead of the bitsliced one\n\nExample: %s ntlm ascii-32-95 9 9 0 803000 67108864 0\n\n", prog_name, prog_name);
   exit(exit_code);
 }
 
@@ -259,7 +279,7 @@ void *host_thread(void *ptr) {
      * CRACKALACK_NO_BITSLICE=1 forces the scalar one.  Every generated table is
      * verified against the CPU reference before it is written, so a regression
      * here fails loudly rather than producing a quietly useless table. */
-    if (getenv("CRACKALACK_NO_BITSLICE") == NULL) {
+    if (!opt_no_bitslice) {
       kernel_path = CRACKALACK_NETNTLMV1_BS_KERNEL_PATH;
       kernel_name = "crackalack_netntlmv1_bs";
       chains_per_item = 32;
@@ -560,6 +580,8 @@ void write_chains(char *filename, unsigned int chains_per_work_unit, gpu_ulong *
 
 
 int main(int ac, char **av) {
+  parse_flags(&ac, av);
+
   gpu_platform platforms[MAX_NUM_PLATFORMS] = {0};
   gpu_device devices[MAX_NUM_DEVICES] = {0};
   pthread_t threads[MAX_NUM_DEVICES] = {0};
@@ -908,7 +930,7 @@ int main(int ac, char **av) {
        *
        * The .rt is still written first, because it is the resume point for an
        * interrupted run -- only a completed table can be compressed. */
-      if (getenv("CRACKALACK_RTC") != NULL) {
+      if (opt_rtc) {
         FILE *f = fopen(filename, "rb");
         if (f != NULL) {
           long sz = 0;
@@ -926,7 +948,7 @@ int main(int ac, char **av) {
                 if (fc != NULL) fclose(fc);
                 printf("done (%" PRIu64 " chains, %.1f%% of the .rt size).\n", written,
                        (sz > 0) ? (100.0 * (double)csz / (double)sz) : 0.0);
-                if (getenv("CRACKALACK_RTC_KEEP") == NULL)
+                if (!opt_keep_rt)
                   unlink(filename);
               } else
                 fprintf(stderr, "Compression failed; the .rt has been left in place.\n");
