@@ -249,6 +249,17 @@ CUresult cuLaunchKernel(CUfunction f,
 
 static const char STUB_PTX[] = "// stub ptx\n.version 8.0\n";
 
+/* A stand-in cubin.  Deliberately binary rather than text: it opens with the
+ * ELF magic a real cubin carries, embeds a NUL byte, and ends in a non-NUL
+ * byte, so any caller that treats the image as a C string -- or that trims a
+ * trailing terminator that is not there -- corrupts it detectably instead of
+ * silently round-tripping. */
+static const unsigned char STUB_CUBIN[] = {
+  0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x33,
+  0x00, 0x00, 0x00, 0x00, 's', 't', 'u', 'b',
+  0x00, 'c', 'u', 'b', 'i', 'n', 0x00, 0xa5
+};
+
 const char *nvrtcGetErrorString(nvrtcResult result) {
   return (result == NVRTC_SUCCESS) ? "NVRTC_SUCCESS" : "NVRTC stub error";
 }
@@ -279,6 +290,14 @@ nvrtcResult nvrtcGetPTXSize(nvrtcProgram prog, size_t *ptx_size) {
 
 nvrtcResult nvrtcGetPTX(nvrtcProgram prog, char *ptx) {
   (void)prog; memcpy(ptx, STUB_PTX, sizeof(STUB_PTX)); return NVRTC_SUCCESS;
+}
+
+nvrtcResult nvrtcGetCUBINSize(nvrtcProgram prog, size_t *cubin_size) {
+  (void)prog; *cubin_size = sizeof(STUB_CUBIN); return NVRTC_SUCCESS;
+}
+
+nvrtcResult nvrtcGetCUBIN(nvrtcProgram prog, char *cubin) {
+  (void)prog; memcpy(cubin, STUB_CUBIN, sizeof(STUB_CUBIN)); return NVRTC_SUCCESS;
 }
 
 nvrtcResult nvrtcDestroyProgram(nvrtcProgram *prog) {

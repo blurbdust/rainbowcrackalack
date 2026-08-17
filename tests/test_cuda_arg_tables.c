@@ -19,6 +19,7 @@
 
 #define _GNU_SOURCE  /* mkstemps */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -270,6 +271,82 @@ static void test_concurrent_churn(void) {
   pass("concurrent load/release leaves no stray arg tables");
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Test 4: a cubin survives the on-disk cache byte for byte.
+ *
+ * The cache was written for PTX, which is text: it stored size-1 bytes to drop
+ * the trailing NUL and re-added one on read.  A cubin is binary -- it has no
+ * terminator, may contain NULs, and its last byte is significant -- so that
+ * same arithmetic silently truncates it, and the corrupted image only surfaces
+ * later as a module that will not load.  The other tests here run with the
+ * cache switched off, so nothing else covers this.
+ * ------------------------------------------------------------------------- */
+static const unsigned char EXPECTED_CUBIN[] = {
+  0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x33,
+  0x00, 0x00, 0x00, 0x00, 's', 't', 'u', 'b',
+  0x00, 'c', 'u', 'b', 'i', 'n', 0x00, 0xa5
+};
+
+static void test_kernel_cache_roundtrip(void) {
+  char dir[] = "/tmp/rcrack_stub_cache_XXXXXX";
+  if (mkdtemp(dir) == NULL) { fail("mkdtemp failed: %s", strerror(errno)); return; }
+  setenv("RCRACK_KERNEL_CACHE", dir, 1);
+
+  gpu_program program = NULL;
+  gpu_kernel  kernel  = NULL;
+
+  /* First load compiles and populates the cache. */
+  load_one(&program, &kernel);
+  gpu_release_kernel(kernel);
+  gpu_release_program(program);
+
+  /* Exactly one entry, and it must match the stub cubin byte for byte. */
+  DIR *d = opendir(dir);
+  if (d == NULL) { fail("opendir(%s) failed", dir); setenv("RCRACK_KERNEL_CACHE", "off", 1); return; }
+  char entry[512];
+  int found = 0;
+  struct dirent *de;
+  while ((de = readdir(d)) != NULL) {
+    if (de->d_name[0] == '.') continue;
+    snprintf(entry, sizeof(entry), "%s/%s", dir, de->d_name);
+    found++;
+  }
+  closedir(d);
+
+  if (found != 1) {
+    fail("expected 1 cache entry, found %d (the cubin was never written)", found);
+    setenv("RCRACK_KERNEL_CACHE", "off", 1);
+    return;
+  }
+
+  unsigned char got[64];
+  size_t n = 0;
+  FILE *f = fopen(entry, "rb");
+  if (f) { n = fread(got, 1, sizeof(got), f); fclose(f); }
+
+  if (n != sizeof(EXPECTED_CUBIN)) {
+    fail("cached cubin is %zu bytes, expected %zu (truncated by NUL-trimming?)",
+         n, sizeof(EXPECTED_CUBIN));
+  } else if (memcmp(got, EXPECTED_CUBIN, n) != 0) {
+    fail("cached cubin differs from the compiled image");
+  } else {
+    /* And it must load back, exercising the cache-hit branch. */
+    load_one(&program, &kernel);
+    if (kernel == NULL) {
+      fail("kernel did not load from the cached cubin");
+    } else {
+      gpu_release_kernel(kernel);
+      gpu_release_program(program);
+      pass("cubin round-trips through the on-disk cache unchanged");
+    }
+  }
+
+  unlink(entry);
+  rmdir(dir);
+  setenv("RCRACK_KERNEL_CACHE", "off", 1);
+}
+
 int main(void) {
   /* Keep the on-disk PTX cache out of it: the stub's fake PTX must never be
    * written where a real run could pick it up. */
@@ -296,6 +373,7 @@ int main(void) {
   test_registry_bounded_across_reloads();
   test_release_evicts_stale_bindings();
   test_concurrent_churn();
+  test_kernel_cache_roundtrip();
 
   int leaked_modules = cuda_stub_live_modules();
   if (leaked_modules != 0)
