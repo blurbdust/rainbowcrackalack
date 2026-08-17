@@ -62,6 +62,7 @@
 #define PRECOMPUTE_KERNEL_PATH "precompute.cl"
 #define PRECOMPUTE_BATCH_KERNEL_PATH "precompute_batch.cl"
 #define PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH "precompute_netntlmv1_7_batch.cl"
+#define PRECOMPUTE_NETNTLMV1_7_BS_KERNEL_PATH "precompute_netntlmv1_7_bs.cl"
 #define FALSE_ALARM_NETNTLMV1_7_KERNEL_PATH "false_alarm_check_netntlmv1_7.cl"
 
 /* The Net-NTLMv1 kernels take the DES plaintext as an argument, and it is now
@@ -998,6 +999,7 @@ void *host_thread_precompute_batch(void *ptr) {
    * differ. */
   char *kernel_path = PRECOMPUTE_BATCH_KERNEL_PATH, *kernel_name = "precompute_batch";
   int use_netntlmv1_7 = 0;
+  unsigned int precompute_slots_per_item = 1;
 
   size_t chunk_positions = 0, gws = 0;
   gpu_ulong *output = NULL;
@@ -1043,8 +1045,17 @@ void *host_thread_precompute_batch(void *ptr) {
 
   use_netntlmv1_7 = is_netntlmv1_7(args->hash_type, args->charset_name, args->plaintext_len_min, args->plaintext_len_max, args->chain_len);
   if (use_netntlmv1_7) {
-    kernel_path = PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH;
-    kernel_name = "precompute_netntlmv1_7_batch";
+    /* Precomputation dominates lookup cost: it walks every chain position to the
+     * end, so the work is chain_len^2 / 2.  Bitsliced, 32 positions ride in one
+     * work item.  CRACKALACK_NO_BITSLICE=1 falls back to the scalar kernel. */
+    if (getenv("CRACKALACK_NO_BITSLICE") == NULL) {
+      kernel_path = PRECOMPUTE_NETNTLMV1_7_BS_KERNEL_PATH;
+      kernel_name = "precompute_netntlmv1_7_bs";
+      precompute_slots_per_item = 32;
+    } else {
+      kernel_path = PRECOMPUTE_NETNTLMV1_7_BATCH_KERNEL_PATH;
+      kernel_name = "precompute_netntlmv1_7_batch";
+    }
     if ((gpu->device_number == 0) && (printed_precompute_optimized_message == 0)) {
       printf("\nNote: optimized Net-NTLMv1-7 kernel will be used for precomputation.\n\n"); fflush(stdout);
       printed_precompute_optimized_message = 1;
@@ -1071,6 +1082,11 @@ void *host_thread_precompute_batch(void *ptr) {
 #endif
   chunk_positions = chunk_positions * gpu->num_work_units;
 
+  /* A bitsliced work item covers 32 positions.  Hand it 32x more positions per
+   * chunk so the DISPATCH stays the same width -- otherwise the 32x drop in work
+   * items costs more in occupancy than bitslicing gains in efficiency. */
+  chunk_positions = chunk_positions * precompute_slots_per_item;
+
   if (user_provided_precompute_gws > 0)
     chunk_positions = user_provided_precompute_gws;
   if (chunk_positions < 1)
@@ -1083,7 +1099,8 @@ void *host_thread_precompute_batch(void *ptr) {
     num_chunks++;
 
   /* One dispatch covers every hash at chunk_positions consecutive positions. */
-  gws = (size_t)num_batch * chunk_positions;
+  /* A bitsliced work item covers precompute_slots_per_item positions. */
+  gws = (size_t)num_batch * ((chunk_positions + precompute_slots_per_item - 1) / precompute_slots_per_item);
 
   total_outputs = (size_t)num_batch * output_len;
   output = calloc(total_outputs, sizeof(gpu_ulong));
