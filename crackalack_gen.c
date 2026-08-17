@@ -315,6 +315,15 @@ void *host_thread(void *ptr) {
   } else if (get_optimal_gws(gpu->device) > 0) {
     gws = get_optimal_gws(gpu->device);
     printf("GPU #%u is using optimized GWS: %"PRIu64"\n", gpu->device_number, gws);
+  } else if (gpu->num_work_units > 0) {
+    /* get_optimal_gws() is a hardcoded table of ~21 Pascal/Turing card names;
+     * anything newer fell through to work_group_size * preferred_multiple, a
+     * constant with no relation to the GPU.  Every tuned entry in that table is
+     * compute_units * a multiplier, so use that shape for unlisted cards.
+     * Measured on an RTX 4000 SFF Ada (48 CUs): the old fallback gave 8192 and
+     * 22,300 chains/s; 48 * 768 = 36,864 reaches the ~28,800 plateau. */
+    gws = (size_t)gpu->num_work_units * 768;
+    printf("GPU #%u is using compute-unit GWS: %u units x 768 = %"PRIu64"\n", gpu->device_number, gpu->num_work_units, (uint64_t)gws);
   } else {
     gws = kernel_work_group_size * kernel_preferred_work_group_size_multiple;
     printf("GPU #%u is using dynamic GWS: %"PRIu64" (work group) x %"PRIu64" (pref. multiple) = %"PRIu64"\n", gpu->device_number, kernel_work_group_size, kernel_preferred_work_group_size_multiple, gws);
