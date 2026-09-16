@@ -35,7 +35,8 @@
 int main(int ac, char **av) {
   uint64_t start = 0, end = 0;
   char *filename = NULL;
-  unsigned int chain_num = 0, file_pos = 0, file_size = 0;
+  unsigned int chain_num = 0;
+  uint64_t file_pos = 0, file_size = 0;
   FILE *f = NULL;
 
 
@@ -47,29 +48,29 @@ int main(int ac, char **av) {
 
   filename = av[1];
   chain_num = (unsigned int)atoi(av[2]);
-  file_pos = chain_num * CHAIN_SIZE;
+  file_pos = (uint64_t)chain_num * CHAIN_SIZE;
 
   f = fopen(filename, "rb");
 
   /* Get the file size. */
-  fseek(f, 0, SEEK_END);
-  file_size = ftell(f);
+  fseeko(f, 0, SEEK_END);
+  file_size = (uint64_t)ftello(f);
 
   /* Ensure that the file size is aligned to 16 bytes.  Otherwise, this
    * rainbow table is invalid or compressed. */
   if ((file_size % CHAIN_SIZE) != 0) {
-    fprintf(stderr, "Error: file size is not aligned to %u bytes: %u\n", CHAIN_SIZE, file_size);
+    fprintf(stderr, "Error: file size is not aligned to %u bytes: %"PRIu64"\n", CHAIN_SIZE, file_size);
     exit(-1);
   }
 
   /* Ensure that the requested chain number is in the file. */
   if (((file_size == CHAIN_SIZE) && (chain_num > 0)) ||
       (file_pos > (file_size - CHAIN_SIZE))) {
-    fprintf(stderr, "Error: requested chain number would extend past end of file.  Max chain number is %u.\n", (file_size / CHAIN_SIZE) - 1);
+    fprintf(stderr, "Error: requested chain number would extend past end of file.  Max chain number is %"PRIu64".\n", (file_size / CHAIN_SIZE) - 1);
     exit(-1);
   }
 
-  fseek(f, file_pos, SEEK_SET);
+  fseeko(f, (off_t)file_pos, SEEK_SET);
   if ((fread(&start, sizeof(start), 1, f) != 1) || \
       (fread(&end, sizeof(end), 1, f) != 1)) {
     fprintf(stderr, "Error while reading start and end indices: %s (%d)\n", strerror(errno), errno);

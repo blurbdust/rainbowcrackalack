@@ -21,6 +21,8 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <locale.h>
 #include <pthread.h>
 #include "compat.h"  /* pthread_barrier_* shim on macOS (no-op elsewhere) */
@@ -138,10 +140,17 @@ uint64_t start_index = 0;
  * partially-constructed table. */
 unsigned int num_chains_to_generate = 0;
 
-/* The first chain that we will generate (this will not be zero if we resume an
- * unfinished file or part index > 0).  We use this to track how many chains we
- * generated so far. */
+/* The first chain that this run will generate (this will not be zero if we
+ * resume an unfinished file or part index > 0).  We use this to track how many
+ * chains we generated so far. */
 uint64_t first_generated_chain = 0;
+
+/* The chain index that lives at offset 0 of the table file: for part N that is
+ * (total_chains_in_table * N).  write_chains() turns a chain index into a file
+ * offset with this, so unlike first_generated_chain it must NOT move when a
+ * partial table is resumed -- otherwise the resumed chains get written over the
+ * start of the file instead of appended to it. */
+uint64_t file_base_chain = 0;
 
 /* The time that the threads were started. */
 struct timespec global_start_time = {0};
@@ -151,6 +160,13 @@ struct timespec last_update_time = {0};
 
 /* Set to 1 if AMD GPUs found. */
 unsigned int is_amd_gpu = 0;
+
+/* The number of GPU host threads, and the largest block of chains any one of
+ * them claims per kernel run.  Their product bounds how far behind a thread's
+ * write offset the file can legitimately be, which is what write_chains() uses
+ * to tell a real gap from a nonsense one. */
+unsigned int num_gpu_devices = 0;
+uint64_t max_indices_per_device = 0;
 
 /* The global work size, as over-ridden by the user on the command line. */
 size_t user_provided_gws = 0;
@@ -211,7 +227,10 @@ void output_progress(unsigned int calculate_time_remaining) {
   printf("Run time: %s; Chains generated: %'"PRIu64"; Rate: %s%'u/s%s\n", time_str, num_chains_generated, WHITEB, (unsigned int)rate, CLR);
 #endif
 
-  if (calculate_time_remaining && (rate > 0.0)) {
+  /* Threads overshoot the target by up to one block each, so the remaining
+   * count can go negative -- in unsigned arithmetic that printed an estimate of
+   * several thousand years on the final update. */
+  if (calculate_time_remaining && (rate > 0.0) && (num_chains_generated < num_chains_to_generate)) {
     seconds_to_human_time(time_str, sizeof(time_str), (num_chains_to_generate - num_chains_generated) / rate);
     printf("Estimated time remaining: %s\n", time_str);
   }
@@ -369,6 +388,14 @@ void *host_thread(void *ptr) {
   }
 
 
+  /* Register this device's block size before claiming any chains, so that by
+   * the time any thread writes, every thread that has claimed a block has
+   * already been counted here. */
+  LOCK_START_INDEX();
+  if (indices_size > max_indices_per_device)
+    max_indices_per_device = indices_size;
+  UNLOCK_START_INDEX();
+
   num_passes = 1;
   if (args->chain_len > MAX_CHAIN_LEN) {
     num_passes = args->chain_len / MAX_CHAIN_LEN;
@@ -503,11 +530,11 @@ void *host_thread(void *ptr) {
 /* Writes the chains given by the kernel to the file. */
 void write_chains(char *filename, unsigned int chains_per_work_unit, gpu_ulong *start_indices, unsigned int start_indices_size, gpu_ulong *end_indices, unsigned int end_indices_size, unsigned int thread_id) {
   int i = 0, j = 0;
-  unsigned int file_size = 0;
+  uint64_t file_size = 0;
   gpu_ulong start = 0;
   rc_file f = rc_fopen(filename, 0), l = NULL;
   char log_filename[256] = {0};
-  int empty_chains = 0;
+  int64_t target_offset = 0, empty_chains = 0, n = 0;
 
 
   if (f == NULL)
@@ -538,24 +565,50 @@ void write_chains(char *filename, unsigned int chains_per_work_unit, gpu_ulong *
 
   /* If we have results that extend past the end of the file, write zeros as
    * placeholders until we get to the point where our data starts. */
-  file_size = rc_ftell(f);
+  file_size = (uint64_t)rc_ftell(f);
 
-  rt_log(l, "Thread #%u: file size at start is %u (%u chains)\n", thread_id, file_size, file_size / CHAIN_SIZE);
+  rt_log(l, "Thread #%u: file size at start is %"PRIu64" (%"PRIu64" chains)\n", thread_id, file_size, file_size / CHAIN_SIZE);
 
-  empty_chains = (int)((((start_indices[0] - first_generated_chain) * CHAIN_SIZE) - file_size) / CHAIN_SIZE);
+  /* Every term here is 64-bit on purpose.  file_size used to be an unsigned
+   * int, so past 4GB it wrapped, the gap below came out as a few hundred
+   * million chains, and each work unit padded the table with several GB of
+   * zeros before writing its handful of real chains.  That is how a 16GB table
+   * turned into a 1.5TB one. */
+  target_offset = (int64_t)((start_indices[0] - file_base_chain) * (uint64_t)CHAIN_SIZE);
+  empty_chains = (target_offset - (int64_t)file_size) / (int64_t)CHAIN_SIZE;
+
+  /* A gap only ever means other threads are holding blocks this one has run
+   * ahead of, so it cannot exceed every device holding its largest block at
+   * once.  (Threads do overrun num_chains_to_generate by up to a block each --
+   * that is what the "extra chains created" truncation at the end is for -- so
+   * the remaining chain count is not a valid bound here.)  Refuse anything
+   * bigger rather than pad the file until the disk fills. */
+  {
+    int64_t max_gap = 0;
+
+    LOCK_START_INDEX();
+    max_gap = (int64_t)(max_indices_per_device * num_gpu_devices);
+    UNLOCK_START_INDEX();
+
+    if (empty_chains > max_gap) {
+      fprintf(stderr, "\nError: refusing to pad the table with %"PRId64" placeholder chains; at most %"PRId64" can be legitimate (file size %"PRIu64", target offset %"PRId64").  This should not happen; please report it.\n", empty_chains, max_gap, file_size, target_offset);
+      fflush(stderr);
+      exit(-1);
+    }
+  }
 
   if (empty_chains > 0)
-    rt_log(l, "\tWriting %d empty chains (%u bytes)\n", empty_chains, empty_chains * CHAIN_SIZE);
+    rt_log(l, "\tWriting %"PRId64" empty chains (%"PRIu64" bytes)\n", empty_chains, (uint64_t)empty_chains * CHAIN_SIZE);
 
-  for (i = 0; i < empty_chains; i++) {
+  for (n = 0; n < empty_chains; n++) {
     rc_fwrite(&start, sizeof(start), 1, f);
     rc_fwrite(&start, sizeof(start), 1, f);
   }
 
   /* Otherwise, if another thread wrote placeholders already, seek to the point at which
    * we need to overwrite. */
-  rt_log(l, "\tSeeking to position %lu (chain #%lu).\n", (start_indices[0] - first_generated_chain) * CHAIN_SIZE, start_indices[0] - first_generated_chain);
-  if (rc_fseek(f, (start_indices[0] - first_generated_chain) * CHAIN_SIZE, RCSEEK_SET) != 0) {
+  rt_log(l, "\tSeeking to position %"PRId64" (chain #%"PRIu64").\n", target_offset, start_indices[0] - file_base_chain);
+  if (rc_fseek(f, target_offset, RCSEEK_SET) != 0) {
     perror("Error seeking in file");
     exit(-1);
   }
@@ -588,7 +641,7 @@ int main(int ac, char **av) {
   char filename[256] = {0}, time_str[128] = {0};
 
   FILE *f = NULL;
-  unsigned int file_size = 0;
+  uint64_t file_size = 0;
   thread_args *args = NULL;
   char *hash_name = NULL, *charset_name = NULL, *charset = NULL;
   unsigned int plaintext_len_min = 0, plaintext_len_max = 0, total_chains_in_table = 0, table_index = 0, benchmark_mode = 0;
@@ -620,7 +673,23 @@ int main(int ac, char **av) {
   plaintext_len_max = (unsigned int)atoi(av[4]);
   table_index = (unsigned int)atoi(av[5]);
   chain_len = (unsigned int)atoi(av[6]);
-  total_chains_in_table = (unsigned int)atoi(av[7]);
+
+  /* strtoull(), not atoi(): a chain count large enough to make a table of more
+   * than 32GB does not fit in an int, and atoi() is undefined once it
+   * overflows.  Anything that does not fit the on-disk field is rejected here
+   * rather than silently wrapping to some other table size. */
+  {
+    char *endptr = NULL;
+    unsigned long long parsed_chains = 0;
+
+    errno = 0;
+    parsed_chains = strtoull(av[7], &endptr, 10);
+    if ((errno != 0) || (endptr == av[7]) || (*endptr != '\0') || (parsed_chains > UINT_MAX)) {
+      fprintf(stderr, "Error: number of chains must be between 1 and %u (the .rt filename field is 32-bit).  For a larger set, keep the chain count and increment the part index instead.\n", UINT_MAX);
+      exit(-1);
+    }
+    total_chains_in_table = (unsigned int)parsed_chains;
+  }
 
   /* See if the user wants to run the benchmarks. */
   if (strcmp(av[8], "-bench") == 0) {
@@ -707,11 +776,13 @@ int main(int ac, char **av) {
     exit(-1);
   }
 
-  file_size = rc_ftell(f);  /* File was opened for appending, so this holds the size. */
+  file_size = (uint64_t)rc_ftell(f);  /* File was opened for appending, so this holds the size. */
   rc_fclose(f);
 
-  /* If the file size implies that it is already complete, run the verifier on it. */
-  if (file_size == (total_chains_in_table * CHAIN_SIZE)) {
+  /* If the file size implies that it is already complete, run the verifier on it.
+   * The multiplication is done in 64 bits: a table of more than 268,435,455
+   * chains is larger than 4GB, and this used to wrap around. */
+  if (file_size == ((uint64_t)total_chains_in_table * CHAIN_SIZE)) {
     if (verify_rainbowtable_file(filename, VERIFY_TABLE_TYPE_GENERATED, VERIFY_TABLE_IS_COMPLETE, VERIFY_TRUNCATE_ON_ERROR, -1)) {
       /* The table is complete, so tell the user and exit. */
       printf("Table in \"%s\" already appears to be complete.  Terminating...\n", filename);
@@ -725,7 +796,7 @@ int main(int ac, char **av) {
 	perror("Error calling stat()");
 	exit(-1);
       }
-      file_size = st.st_size;
+      file_size = (uint64_t)st.st_size;
     }
   }
 
@@ -747,17 +818,25 @@ int main(int ac, char **av) {
     rc_fseek(f, 0, RCSEEK_END);
     if (rc_ftell(f) >= CHAIN_SIZE) {
 
-      /* Seek to the last starting index in the file and read it. */
-      rc_fseek(f, CHAIN_SIZE, RCSEEK_END);
-      rc_fread(&start_index, sizeof(start_index), 1, f);
+      /* Seek to the last starting index in the file and read it.  The offset is
+       * negative: seeking to END + CHAIN_SIZE landed past the end of the file,
+       * the read returned nothing, and start_index silently stayed at 0, so a
+       * resumed run regenerated chains from the beginning and never filled in
+       * the tail it was supposed to. */
+      rc_fseek(f, -(int64_t)CHAIN_SIZE, RCSEEK_END);
+      if (rc_fread(&start_index, sizeof(start_index), 1, f) != 1) {
+        fprintf(stderr, "Error: failed to read the last start index from the partial table.\n");
+        exit(-1);
+      }
 
       start_index++;  /* Increment the index to the next one needed. */
       first_generated_chain = start_index;
+      file_base_chain = (uint64_t)total_chains_in_table * part_index;
 
       /* The number of chains left to generate would be the total requested by the
        * user, minus the number of chains already in the file. */
       rc_fseek(f, 0, RCSEEK_END);
-      num_chains_to_generate = total_chains_in_table - (rc_ftell(f) / CHAIN_SIZE);
+      num_chains_to_generate = (unsigned int)((uint64_t)total_chains_in_table - ((uint64_t)rc_ftell(f) / CHAIN_SIZE));
 
       resuming_table = 1;
     }
@@ -766,7 +845,7 @@ int main(int ac, char **av) {
     uint64_t plaintext_space_up_to_index[16] = {0};
 
 
-    start_index = first_generated_chain = total_chains_in_table * part_index;
+    start_index = first_generated_chain = file_base_chain = (uint64_t)total_chains_in_table * part_index;
     num_chains_to_generate = total_chains_in_table;
 
     /* Ensure our plaintext_space_up_to_index array is large enough to call
@@ -812,6 +891,8 @@ int main(int ac, char **av) {
     exit(-1);
   }
 
+  num_gpu_devices = num_devices;
+
   args = calloc(num_devices, sizeof(thread_args));
   if (args == NULL) {
     fprintf(stderr, "Error while creating thread arg array.\n");
@@ -819,11 +900,11 @@ int main(int ac, char **av) {
   }
 
   /* Print info about how we're generating the table. */
-  printf("Output file:\t\t%s\nHash algorithm:\t\t%s\nCharset name:\t\t%s\nCharset:\t\t%s\nCharset length:\t\t%"PRIu64"\nPlaintext length range: %u - %u\nReduction offset:\t0x%x\nChain length:\t\t%u\nNumber of chains:\t%u\nPart index:\t\t%"PRIu64"\n\n", filename, hash_name, charset_name, charset, strlen(charset), plaintext_len_min, plaintext_len_max, TABLE_INDEX_TO_REDUCTION_OFFSET(table_index), chain_len, total_chains_in_table, part_index);
+  printf("Output file:\t\t%s\nHash algorithm:\t\t%s\nCharset name:\t\t%s\nCharset:\t\t%s\nCharset length:\t\t%"PRIu64"\nPlaintext length range: %u - %u\nReduction offset:\t0x%x\nChain length:\t\t%u\nNumber of chains:\t%u\nTable size:\t\t%.2f GiB (%"PRIu64" bytes)\nPart index:\t\t%"PRIu64"\n\n", filename, hash_name, charset_name, charset, strlen(charset), plaintext_len_min, plaintext_len_max, TABLE_INDEX_TO_REDUCTION_OFFSET(table_index), chain_len, total_chains_in_table, (double)((uint64_t)total_chains_in_table * CHAIN_SIZE) / (1024.0 * 1024.0 * 1024.0), (uint64_t)total_chains_in_table * CHAIN_SIZE, part_index);
 
   /* If we found a file to append to, tell the user what's happening. */
   if (resuming_table)
-    printf("Appending to existing file (%s) at chain #X.\n\n", filename);
+    printf("Appending to existing file (%s) at chain #%"PRIu64" (%u chains left to generate).\n\n", filename, start_index, num_chains_to_generate);
 
   /* Print a time stamp of when the generation begins. */
   start_timer(&global_start_time);
@@ -882,14 +963,16 @@ int main(int ac, char **av) {
     printf("\nGeneration complete!\n");
 
     if (stat(filename, &st) == 0) {
-      unsigned int actual_num_chains = st.st_size / CHAIN_SIZE;
+      uint64_t actual_num_chains = (uint64_t)st.st_size / CHAIN_SIZE;
 
       /* If we generated more chains than the user requested, rename the file to
-       * reflect this. */
-      if (actual_num_chains > total_chains_in_table) {
+       * reflect this.  Both the count and the truncation length are 64-bit:
+       * truncating in 32-bit arithmetic would have chopped a correct 16GB table
+       * down to whatever (chains * 16) mod 4GB happened to be. */
+      if (actual_num_chains > (uint64_t)total_chains_in_table) {
 	if (VERBOSE)
-	  printf("\nNote %u extra chains created.  Truncating...\n", actual_num_chains - total_chains_in_table);
-	if (truncate(filename, total_chains_in_table * CHAIN_SIZE) != 0) {
+	  printf("\nNote %"PRIu64" extra chains created.  Truncating...\n", actual_num_chains - (uint64_t)total_chains_in_table);
+	if (truncate(filename, (off_t)((uint64_t)total_chains_in_table * CHAIN_SIZE)) != 0) {
 	  fprintf(stderr, "Error while truncating file %s: %s (%d)\n", filename, strerror(errno), errno);
 	}
 

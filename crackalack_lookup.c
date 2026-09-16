@@ -1996,7 +1996,7 @@ static preloaded_table *load_one_table(const char *filepath, double *io_secs) {
   /* If the table is uncompressed (*.rt), then there's a possibility its unsorted on accident.  We will
    * verify them first to make sure. */
   if (is_uncompressed_table == 1) {
-    if (!verify_rainbowtable(rainbow_table, num_chains, VERIFY_TABLE_TYPE_LOOKUP, 0, 0, NULL)) {
+    if (!verify_rainbowtable(rainbow_table, num_chains, 0, VERIFY_TABLE_TYPE_LOOKUP, 0, 0, NULL)) {
       fprintf(stderr, "\nError: %s is not a valid table suitable for lookups!  (Hint: it may not be sorted.)  Skipping...\n\n", filepath);  fflush(stderr);
       FREE(rainbow_table);
       return NULL;
