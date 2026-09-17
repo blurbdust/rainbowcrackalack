@@ -26,6 +26,8 @@ nvrtcResult nvrtcGetProgramLogSize(nvrtcProgram prog, size_t *log_size);
 nvrtcResult nvrtcGetProgramLog(nvrtcProgram prog, char *log);
 nvrtcResult nvrtcGetPTXSize(nvrtcProgram prog, size_t *ptx_size);
 nvrtcResult nvrtcGetPTX(nvrtcProgram prog, char *ptx);
+nvrtcResult nvrtcGetCUBINSize(nvrtcProgram prog, size_t *cubin_size);
+nvrtcResult nvrtcGetCUBIN(nvrtcProgram prog, char *cubin);
 nvrtcResult nvrtcDestroyProgram(nvrtcProgram *prog);
 
 #endif /* _CUDA_STUB_NVRTC_H */

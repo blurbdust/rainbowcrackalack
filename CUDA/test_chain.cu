@@ -26,7 +26,7 @@ extern "C" __global__ void test_chain(
   unsigned int chain_len = *g_chain_len;
   unsigned long long start = *g_start;
 
-  unsigned int charset_len = g_strncpy(charset, g_charset, sizeof(charset));
+  unsigned int charset_len = g_copy_charset(charset, g_charset, sizeof(charset));
   unsigned long long plaintext_space_up_to_index[MAX_PLAINTEXT_LEN];
   unsigned char plaintext[MAX_PLAINTEXT_LEN];
   unsigned int plaintext_len = 0;

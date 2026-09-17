@@ -21,7 +21,7 @@ __kernel void crackalack(
   unsigned long start_index = g_indices[get_global_id(0)];
   unsigned int pos = *g_pos_start;
 
-  unsigned int charset_len = g_strncpy(charset, g_charset, sizeof(charset));
+  unsigned int charset_len = g_copy_charset(charset, g_charset, sizeof(charset));
   
   unsigned long plaintext_space_up_to_index[MAX_PLAINTEXT_LEN];
   unsigned char plaintext[MAX_PLAINTEXT_LEN];

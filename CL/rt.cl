@@ -32,9 +32,23 @@ inline void index_to_plaintext(unsigned long index, char *charset, unsigned int 
 
 inline void do_hash(unsigned int hash_type, unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash_value, unsigned int *hash_len /*, __global unsigned char *g_debug*/) {
 
-#if HASH_TYPE == HASH_NETNTLMV1
+#if HASH_TYPE == HASH_NTLM
+  /* This branch was lost in commit 2736101, which made NTLM hashing a silent
+   * no-op on OpenCL: the hash buffer stayed zero, so hash_to_index() returned
+   * just `pos` and every chain ended at chain_len-2.  Metal and CUDA kept it. */
+  ntlm_hash(plaintext, plaintext_len, hash_value);
+  *hash_len = 16;
+#elif HASH_TYPE == HASH_NETNTLMV1
   uint32_t SK[32];
-  netntlmv1_hash(SK, plaintext, hash_value /*, g_debug*/);
+  /* DES always consumes 7 bytes of plaintext.  Zero any positions beyond
+   * plaintext_len so short plaintexts match the CPU reference, which uses a
+   * zero-initialised buffer.  (CUDA does this; Metal currently does not.) */
+  for (int _i = (int)plaintext_len; _i < 7; _i++) plaintext[_i] = 0;
+  /* Generic path retains the historical default server challenge
+   * 11 22 33 44 55 66 77 88.  Only the NetNTLMv1-7 fast-path kernels accept a
+   * runtime-configurable challenge. */
+  unsigned char _default_challenge[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+  netntlmv1_hash_challenge(SK, plaintext, hash_value, _default_challenge);
   *hash_len = 8;
 #endif
 

@@ -35,6 +35,7 @@
 
 #include "charset.h"
 #include "misc.h"
+#include "cpu_rt_functions.h"
 #include "shared.h"
 
 
@@ -253,11 +254,15 @@ unsigned int is_ntlm9(unsigned int hash_type, char *charset, unsigned int plaint
  * index, in 8 bytes of registers -- and the specialized kernels also keep the
  * DES S-boxes in shared memory.  Measured at 4.5x on precomputation. */
 unsigned int is_netntlmv1_7(unsigned int hash_type, char *charset_name, unsigned int plaintext_len_min, unsigned int plaintext_len_max, unsigned int chain_len) {
-  if ((hash_type == HASH_NETNTLMV1) && \
+  /* chain_len is deliberately NOT constrained: it is a runtime kernel argument
+   * (g_chain_len), so the specialized kernels handle any chain length.  Pinning
+   * it to 881689 meant any other chain length silently fell back to the generic
+   * kernels - which would quietly undo the win from longer chains. */
+  (void)chain_len;
+  if (is_netntlmv1_family(hash_type) && \
       (strcmp(charset_name, "byte") == 0) && \
       (plaintext_len_min == 7) && \
-      (plaintext_len_max == 7) && \
-      (chain_len == 881689))
+      (plaintext_len_max == 7))
     return 1;
   else
     return 0;
@@ -299,7 +304,11 @@ void parse_rt_params(rt_parameters *rt_params, char *rt_filename_orig) {
 
 
     *hpos = '\0';
-    upos = strchr(rt_filename, '_');
+    /* Split on the LAST underscore, not the first: charset names never contain
+     * an underscore, but hash names may ("netntlmv1-lm"), and strchr() would
+     * otherwise parse netntlmv1-lm_byte#... as hash "netntlmv1" / charset
+     * "lm_byte" and fail charset validation. */
+    upos = strrchr(rt_filename, '_');
     if (upos) {
       char *hash_name_ptr = rt_filename;
       char *charset_name_ptr = upos + 1;

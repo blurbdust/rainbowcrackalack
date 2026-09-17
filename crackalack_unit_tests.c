@@ -280,6 +280,18 @@ int main(int ac, char **av) {
   CLRELEASEPROGRAM(program);
 
 
+  /* CPU-only: no GPU kernel exists for Net-NTLMv1 chain generation yet. Once the
+   * specialized generation kernel lands, extend this to run the GPU side too and
+   * diff against these same vectors. */
+  printf("Running Net-NTLMv1 chain tests (CPU)... "); fflush(stdout);
+  if (!test_chain_netntlmv1_cpu()) {
+    ret = -1;
+    all_tests_passed = 0;
+    PRINT_FAILED();
+  } else
+    PRINT_PASSED();
+
+
   printf("Running NTLM9 chain tests... "); fflush(stdout);
   hash_type = HASH_NTLM;
   /*load_kernel(context, num_devices, devices, "test_chain_ntlm9.cl", "test_chain_ntlm9", &program, &kernel, hash_type);*/

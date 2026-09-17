@@ -16,7 +16,9 @@
 
 void _print_chain_error(uint64_t random_chain, uint64_t start, uint64_t actual_end, uint64_t computed_end);
 
-int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, unsigned int table_type, uint64_t expected_start, uint64_t plaintext_space_total, unsigned int *error_chain_num);
+/* 'chain_num_base' is the absolute chain number of rainbowtable[0], so that a
+ * table verified in blocks still reports absolute chain numbers. */
+int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, uint64_t chain_num_base, unsigned int table_type, uint64_t expected_start, uint64_t plaintext_space_total, unsigned int *error_chain_num);
 
 int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned int table_should_be_complete, unsigned int truncate_at_error, int num_chains_to_verify);
 

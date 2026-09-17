@@ -18,6 +18,9 @@ void md4_encrypt(unsigned int *hash, unsigned int *W);
 
 void setup_des_key(char key_56[], unsigned char *key);
 
+const unsigned char *netntlmv1_challenge_for(unsigned int hash_type);
+unsigned int is_netntlmv1_family(unsigned int hash_type);
 void netntlmv1_hash(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash);
+void netntlmv1_hash_challenge(unsigned char *plaintext, unsigned int plaintext_len, unsigned char *hash, const unsigned char *challenge);
 
 #endif

@@ -30,13 +30,40 @@
 #include "shared.h"
 #include "verify.h"
 
+/* Chains read per block when streaming an uncompressed table (64MB). */
+#define VERIFY_CHUNK_CHAINS (4 * 1024 * 1024)
+
 
 void _print_chain_error(uint64_t random_chain, uint64_t start, uint64_t actual_end, uint64_t computed_end) {
   fprintf(stderr, "Error: chain #%"PRIu64" is invalid!\n  Start index:        %"PRIu64"\n  Actual chain end:   %"PRIu64"\n  Computed chain end: %"PRIu64"\n\n", random_chain, start, actual_end, computed_end);
 }
 
+/* Fetches one chain: straight out of memory for a decompressed table, or from
+ * the file for one that is being streamed rather than fully loaded. */
+static int read_chain(rc_file f, uint64_t *rainbow_table, uint64_t chain_num, uint64_t *start, uint64_t *end) {
+  uint64_t pair[2] = {0};
+
+
+  if (rainbow_table != NULL) {
+    *start = rainbow_table[chain_num * 2];
+    *end = rainbow_table[(chain_num * 2) + 1];
+    return 1;
+  }
+
+  if (rc_fseek(f, (int64_t)(chain_num * CHAIN_SIZE), RCSEEK_SET) != 0)
+    return 0;
+
+  if (rc_fread(pair, sizeof(uint64_t), 2, f) != 2)
+    return 0;
+
+  *start = pair[0];
+  *end = pair[1];
+  return 1;
+}
+
+
 /* Verifies a rainbow table already loaded from disk. */
-int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, unsigned int table_type, uint64_t expected_start, uint64_t plaintext_space_total, unsigned int *error_chain_num) {
+int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, uint64_t chain_num_base, unsigned int table_type, uint64_t expected_start, uint64_t plaintext_space_total, unsigned int *error_chain_num) {
   unsigned int i = 0;
   uint64_t start = 0, end = 0;
 
@@ -48,13 +75,13 @@ int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, unsigne
       end = rainbowtable[(i * 2) + 1];
 
       if (start != expected_start) {
-	fprintf(stderr, "Start index at chain #%u is not the expected value!  Expected %"PRIu64", but found %"PRIu64".\n", i, expected_start, start);
+	fprintf(stderr, "Start index at chain #%"PRIu64" is not the expected value!  Expected %"PRIu64", but found %"PRIu64".\n", chain_num_base + i, expected_start, start);
 	*error_chain_num = i;
 	return 0;
       }
 
       if (end == 0) {
-	fprintf(stderr, "Chain #%u has an end value of zero!\n", i);
+	fprintf(stderr, "Chain #%"PRIu64" has an end value of zero!\n", chain_num_base + i);
 	*error_chain_num = i;
 	return 0;
       }
@@ -83,7 +110,7 @@ int verify_rainbowtable(uint64_t *rainbowtable, unsigned int num_chains, unsigne
       }
 */
       if (end < last_end) {
-	fprintf(stderr, "Error: table end indices are not sorted.  Current end index (at chain #%u) is not greater or equal to last end index.\n\n\tCurrent end index: %"PRIu64"\n\tLast end index:    %"PRIu64"\n\n", i, end, last_end);
+	fprintf(stderr, "Error: table end indices are not sorted.  Current end index (at chain #%"PRIu64") is not greater or equal to last end index.\n\n\tCurrent end index: %"PRIu64"\n\tLast end index:    %"PRIu64"\n\n", chain_num_base + i, end, last_end);
 	return 0;
       }
 
@@ -134,7 +161,10 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
   uint64_t *rainbow_table = NULL;
   char *charset = NULL;
 
-  unsigned int file_size = 0, actual_num_chains = 0, error_chain_num = 0, is_compressed = 0;
+  uint64_t *chunk = NULL;
+  uint64_t file_size = 0;
+  unsigned int actual_num_chains = 0, error_chain_num = 0, is_compressed = 0;
+  unsigned int verify_failed = 0, io_error = 0;
   uint64_t expected_start = 0, plaintext_space_total = 0;
 
 
@@ -153,7 +183,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     return 0;
   }
 
-  plaintext_space_total = fill_plaintext_space_table(strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, plaintext_space_up_to_index);
+  plaintext_space_total = fill_plaintext_space_table((strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, plaintext_space_up_to_index);
 
   expected_start = (uint64_t)rt_params.num_chains * (uint64_t)rt_params.table_part;
 
@@ -172,7 +202,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 
   /* Get the file size. */
   rc_fseek(f, 0, RCSEEK_END);
-  file_size = rc_ftell(f);
+  file_size = (uint64_t)rc_ftell(f);
   rc_fseek(f, 0, RCSEEK_SET);
 
   /* An empty file is always an error. */
@@ -181,14 +211,14 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     fprintf(stderr, "Error: file is empty!\n");
     return 0;
   /* If the table should be complete, then ensure its file size is what we'd expect.  Skip compressed files. */
-  } else if ((table_should_be_complete == VERIFY_TABLE_IS_COMPLETE) && (file_size != (rt_params.num_chains * CHAIN_SIZE)) && !is_compressed) {
+  } else if ((table_should_be_complete == VERIFY_TABLE_IS_COMPLETE) && (file_size != ((uint64_t)rt_params.num_chains * CHAIN_SIZE)) && !is_compressed) {
     rc_fclose(f);
-    fprintf(stderr, "Error: table is expected to be complete, but file size does not match expected value.  Expected: %u; actual: %u\n", rt_params.num_chains * CHAIN_SIZE, file_size);
+    fprintf(stderr, "Error: table is expected to be complete, but file size does not match expected value.  Expected: %"PRIu64"; actual: %"PRIu64"\n", (uint64_t)rt_params.num_chains * CHAIN_SIZE, file_size);
     return 0;
   /* If the table is incomplete, ensure that the file size is a multiple of CHAIN_SIZE. */
   } else if (((file_size % CHAIN_SIZE) != 0) && !is_compressed) {
     rc_fclose(f);
-    fprintf(stderr, "Error: file size is not aligned to %u bytes: %u\n", CHAIN_SIZE, file_size);
+    fprintf(stderr, "Error: file size is not aligned to %u bytes: %"PRIu64"\n", CHAIN_SIZE, file_size);
     return 0;
   }
 
@@ -208,7 +238,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 
 
     /* The actual number of chains in the file. */
-    actual_num_chains = file_size / CHAIN_SIZE;
+    actual_num_chains = (unsigned int)(file_size / CHAIN_SIZE);
 
     /* Only verify 5 chains. */
     for (i = 0; i < 5; i++) {
@@ -220,7 +250,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
       rc_fread(&actual_end, sizeof(uint64_t), 1, f);
 
       /* Compute the expected end point. */
-      computed_end = generate_rainbow_chain(rt_params.hash_type, charset, strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
+      computed_end = generate_rainbow_chain(rt_params.hash_type, charset, (strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
 
       /* Ensure that the end point in the file matches what we just computed. */
       if (actual_end != computed_end) {
@@ -240,6 +270,7 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 
 
     rc_fclose(f);
+    f = NULL;
     ret = rtc_decompress(filename, &rainbow_table, &actual_num_chains);
     if (ret < 0) {
       fprintf(stderr, "Error while decompressing RTC file: %d\n", ret);
@@ -249,33 +280,81 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     if (table_type == VERIFY_TABLE_TYPE_GENERATED)
       printf("\n!! WARNING: table is compressed, yet is supposedly unsorted!  Only sorted tables should be compressed...\n\n");
 
-  } else { /* Simply load uncompressed RT files. */
-    actual_num_chains = file_size / CHAIN_SIZE;
-    rainbow_table = calloc(actual_num_chains * 2, sizeof(uint64_t));
-    if (rainbow_table == NULL) {
+    if (!verify_rainbowtable(rainbow_table, actual_num_chains, 0, table_type, expected_start, plaintext_space_total, &error_chain_num))
+      verify_failed = 1;
+
+  } else { /* Uncompressed tables are streamed, a block at a time. */
+    uint64_t chains_done = 0;
+
+    actual_num_chains = (unsigned int)(file_size / CHAIN_SIZE);
+
+    /* Tables now run to tens of gigabytes, so the whole thing no longer fits in
+     * the RAM of the machine that generated it (and "actual_num_chains * 2" as
+     * an unsigned int overflowed past 2^31 chains anyway).  Read a block at a
+     * time instead, overlapping by one chain so the checks that compare a chain
+     * against its predecessor still hold across a block boundary. */
+    chunk = calloc((size_t)VERIFY_CHUNK_CHAINS * 2, sizeof(uint64_t));
+    if (chunk == NULL) {
+      rc_fclose(f);
       fprintf(stderr, "Error while creating buffer to read file.\n");
       return 0;
     }
 
-    if (rc_fread(rainbow_table, sizeof(uint64_t), actual_num_chains * 2, f) != (actual_num_chains * 2)) {
-      fprintf(stderr, "Error while reading file: %s (%d)\n", strerror(errno), errno);
-      return 0;
+    while (chains_done < actual_num_chains) {
+      uint64_t overlap = (chains_done > 0) ? 1 : 0;
+      uint64_t base = chains_done - overlap;
+      uint64_t num_to_read = (uint64_t)actual_num_chains - base;
+      unsigned int chunk_error_chain = 0;
+
+      if (num_to_read > VERIFY_CHUNK_CHAINS)
+        num_to_read = VERIFY_CHUNK_CHAINS;
+
+      if (rc_fseek(f, (int64_t)(base * CHAIN_SIZE), RCSEEK_SET) != 0) {
+        fprintf(stderr, "Error while seeking in file.\n");
+        io_error = 1;
+        break;
+      }
+
+      if (rc_fread(chunk, sizeof(uint64_t), (size_t)(num_to_read * 2), f) != (size_t)(num_to_read * 2)) {
+        fprintf(stderr, "Error while reading file: %s (%d)\n", strerror(errno), errno);
+        io_error = 1;
+        break;
+      }
+
+      if (!verify_rainbowtable(chunk, (unsigned int)num_to_read, base, table_type, expected_start + base, plaintext_space_total, &chunk_error_chain)) {
+        error_chain_num = (unsigned int)(base + chunk_error_chain);
+        verify_failed = 1;
+        break;
+      }
+
+      chains_done = base + num_to_read;
     }
-    rc_fclose(f);
+
+    FREE(chunk);
   }
 
-  if (!verify_rainbowtable(rainbow_table, actual_num_chains, table_type, expected_start, plaintext_space_total, &error_chain_num)) {
+  if (verify_failed) {
     if ((table_type == VERIFY_TABLE_TYPE_GENERATED) && (truncate_at_error == VERIFY_TRUNCATE_ON_ERROR)) {
+      /* Close the streaming handle first; the truncation path opens its own. */
+      if (f != NULL) {
+        rc_fclose(f);
+        f = NULL;
+      }
+
       f = rc_fopen(filename, 0);
       if (f == NULL)
 	fprintf(stderr, "Error while opening file for truncation: %s (%d)\n", strerror(errno), errno);
       else {
-	rc_ftruncate(f, (error_chain_num * CHAIN_SIZE));
+	rc_ftruncate(f, ((uint64_t)error_chain_num * CHAIN_SIZE));
 	rc_fclose(f);
+	f = NULL;
       }
     }
     goto err;
   }
+
+  if (io_error)
+    goto err;
 
   /* If the number of chains to verify wasn't set by the user... */
   if (num_chains_to_verify < 0) {
@@ -295,15 +374,22 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
     unsigned int i = 0, plaintext_len = sizeof(plaintext), hash_len = sizeof(hash);
 
 
-    if (rt_params.hash_type == HASH_NTLM) {
+    /* The CPU chain path now supports Net-NTLMv1 too (cpu_rt_functions.c), so
+     * generated tables get verified instead of trusted. */
+    if ((rt_params.hash_type == HASH_NTLM) || is_netntlmv1_family(rt_params.hash_type)) {
       for (i = 0; i < num_chains_to_verify; i++) {
 	random_chain = get_random(actual_num_chains);
 	/*printf("  Verifying chain #%"PRIu64"...\n", random_chain);*/
 
-	start = rainbow_table[random_chain * 2];
-	actual_end = rainbow_table[(random_chain * 2) + 1];
+	if (!read_chain(f, rainbow_table, random_chain, &start, &actual_end)) {
+	  fprintf(stderr, "Error while reading chain #%"PRIu64" for verification.\n", random_chain);
+	  goto err;
+	}
 
-	computed_end = generate_rainbow_chain(rt_params.hash_type, charset, strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
+	/* strlen() cannot measure the byte charset, which contains 0x00 and is
+	 * the only 256-character charset -- same strlen()==0 -> 256 rule the
+	 * host uses everywhere else. */
+	computed_end = generate_rainbow_chain(rt_params.hash_type, charset, (strlen(charset) == 0) ? 256 : strlen(charset), rt_params.plaintext_len_min, rt_params.plaintext_len_max, rt_params.reduction_offset, rt_params.chain_len, start, plaintext_space_up_to_index, plaintext_space_total, plaintext, &plaintext_len, hash, &hash_len);
 
 	if (actual_end != computed_end) {
           _print_chain_error(random_chain, start, actual_end, computed_end);
@@ -311,14 +397,18 @@ int verify_rainbowtable_file(char *filename, unsigned int table_type, unsigned i
 	}
       }
     } else {
-      printf("Note: skipping CPU chain verification since hash type is not NTLM.\n"); fflush(stdout);
+      printf("Note: skipping CPU chain verification; no CPU reference for this hash type.\n"); fflush(stdout);
     }
   }
 
+  if (f != NULL)
+    rc_fclose(f);
   FREE(rainbow_table);
   return 1;
 
  err:
+  if (f != NULL)
+    rc_fclose(f);
   FREE(rainbow_table);
   return 0;
 }

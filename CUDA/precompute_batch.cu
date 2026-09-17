@@ -80,7 +80,7 @@ extern "C" __global__ void precompute_batch(
   /* g_strncpy copies all n bytes and does not stop at a NUL, which matters:
    * the 'byte' charset begins with 0x00, so stopping would leave charset_len
    * at 0 and collapse the plaintext space to zero. */
-  unsigned int charset_len = g_strncpy(charset, g_charset, MAX_CHARSET_LEN);
+  unsigned int charset_len = g_copy_charset(charset, g_charset, MAX_CHARSET_LEN);
   unsigned long long plaintext_space_total = fill_plaintext_space_table(charset_len, plaintext_len_min, plaintext_len_max, plaintext_space_up_to_index);
 
   g_memcpy(hash, g_hashes + ((unsigned long long)hash_idx * in_hash_len), in_hash_len);

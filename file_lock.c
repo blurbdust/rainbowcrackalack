@@ -106,43 +106,58 @@ size_t rc_fwrite(const void *ptr, size_t size, size_t nmemb, rc_file f) {
 }
 
 
-/* For 'whence' arg, use RCSEEK_* flags.  Returns 0 on success. */
-int rc_fseek(rc_file f, long offset, int whence) {
+/* For 'whence' arg, use RCSEEK_* flags.  Returns 0 on success.
+ *
+ * The Ex/off_t variants are used throughout: SetFilePointer() and fseek() take
+ * a 32-bit offset on Win64 and on 32-bit hosts, which silently truncates every
+ * offset in a table larger than 2GB. */
+int rc_fseek(rc_file f, int64_t offset, int whence) {
   int ret = -1;
 
 #ifdef _WIN32
-  if (SetFilePointer(f, offset, 0, whence) == INVALID_SET_FILE_POINTER)
-    windows_print_error("SetFilePointer");
+  LARGE_INTEGER distance;
+
+  distance.QuadPart = offset;
+  if (!SetFilePointerEx(f, distance, NULL, whence))
+    windows_print_error("SetFilePointerEx");
   else
     ret = 0;
 #else
-  ret = fseek(f, offset, whence);
+  ret = fseeko(f, (off_t)offset, whence);
   if (ret != 0)
-    perror("fseek");
+    perror("fseeko");
 #endif
 
   return ret;
 }
 
 
-long rc_ftell(rc_file f) {
+int64_t rc_ftell(rc_file f) {
 
 #ifdef _WIN32
-  return SetFilePointer(f, 0, 0, RCSEEK_CUR);
+  LARGE_INTEGER zero, position;
+
+  zero.QuadPart = 0;
+  position.QuadPart = 0;
+  if (!SetFilePointerEx(f, zero, &position, RCSEEK_CUR)) {
+    windows_print_error("SetFilePointerEx");
+    return -1;
+  }
+  return (int64_t)position.QuadPart;
 #else
-  return ftell(f);
+  return (int64_t)ftello(f);
 #endif
   
 }
 
 
 /* Returns 0 on success. */
-int rc_ftruncate(rc_file f, unsigned long length) {
+int rc_ftruncate(rc_file f, uint64_t length) {
   
 #ifdef _WIN32
   int ret = -1;
 
-  if (rc_fseek(f, length, RCSEEK_SET) != 0)
+  if (rc_fseek(f, (int64_t)length, RCSEEK_SET) != 0)
     fprintf(stderr, "Failed to truncate file because seek failed.\n");
   else {
     if (!SetEndOfFile(f))
@@ -153,7 +168,7 @@ int rc_ftruncate(rc_file f, unsigned long length) {
 
   return ret;
 #else
-  return ftruncate(fileno(f), length);
+  return ftruncate(fileno(f), (off_t)length);
 #endif
 
 }

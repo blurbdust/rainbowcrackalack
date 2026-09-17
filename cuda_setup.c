@@ -494,13 +494,15 @@ static char *cuda_read_cache(const char *path, size_t *out_size) {
   return buf;
 }
 
-/* Write PTX to the cache atomically (temp file + rename).  Best effort. */
-static void cuda_write_cache(const char *path, const char *ptx, size_t ptx_size) {
+/* Write a compiled kernel image to the cache atomically (temp file + rename).
+ * n is the exact byte count: PTX passes size-1 to drop the trailing NUL, a
+ * cubin passes its full size because it is binary and has no terminator.
+ * Best effort. */
+static void cuda_write_cache(const char *path, const char *ptx, size_t n) {
   char tmp[600];
   snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
   FILE *f = fopen(tmp, "wb");
   if (!f) return;
-  size_t n = ptx_size ? ptx_size - 1 : 0;   /* drop trailing NUL; re-added on read */
   if (n && fwrite(ptx, 1, n, f) != n) { fclose(f); unlink(tmp); return; }
   fclose(f);
   if (rename(tmp, path) != 0) unlink(tmp);
@@ -543,15 +545,23 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
   int cc_major = 0, cc_minor = 0;
   cuDeviceGetAttribute(&cc_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, devices[0]);
   cuDeviceGetAttribute(&cc_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, devices[0]);
+  /* Target the REAL arch (sm_) rather than the virtual one (compute_) so NVRTC
+   * emits ready-to-run SASS that the driver loads directly.  Virtual-arch PTX
+   * has to be JIT-compiled by the driver, and a driver older than the CUDA
+   * toolkit rejects PTX from a newer ISA outright ("the provided PTX was
+   * compiled with an unsupported toolchain") -- which is exactly what happens
+   * inside a recent CUDA container on a host with an older driver.  Compiling
+   * to SASS here sidesteps the driver's PTX JIT entirely.  PTX remains the
+   * fallback below for the rare toolkit that cannot produce a cubin. */
   char arch_opt[64];
-  snprintf(arch_opt, sizeof(arch_opt), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
+  snprintf(arch_opt, sizeof(arch_opt), "--gpu-architecture=sm_%d%d", cc_major, cc_minor);
 
   char hash_type_opt[64];
   snprintf(hash_type_opt, sizeof(hash_type_opt), "-DHASH_TYPE=%u", hash_type);
 
   /* Cache key: content hash of resolved source + arch + build flags. */
   uint64_t key = 1469598103934665603ULL;   /* FNV-1a offset basis */
-  cuda_fnv1a(&key, "rcrack-ptx-v1|");       /* bump to invalidate all entries */
+  cuda_fnv1a(&key, "rcrack-img-v2|");       /* bump to invalidate all entries */
   cuda_fnv1a(&key, full);
   cuda_fnv1a(&key, arch_opt);
   cuda_fnv1a(&key, hash_type_opt);
@@ -561,7 +571,7 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
   { char cdir[512];
     if (cuda_cache_dir(cdir, sizeof(cdir))) {
       cuda_mkdir_p(cdir);
-      snprintf(cache_path, sizeof(cache_path), "%s/k_%016llx.ptx", cdir,
+      snprintf(cache_path, sizeof(cache_path), "%s/k_%016llx.bin", cdir,
                (unsigned long long)key);
       have_cache = 1;
     }
@@ -572,7 +582,7 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
 
   if (ptx) {
     /* Cache hit: skip NVRTC entirely. */
-    fprintf(stderr, "  [cuda] %s: loaded cached PTX (%zu bytes, arch=compute_%d%d)\n",
+    fprintf(stderr, "  [cuda] %s: loaded cached image (%zu bytes, arch=sm_%d%d)\n",
             kernel_name, ptx_size ? ptx_size - 1 : 0, cc_major, cc_minor);
     free(full);
   } else {
@@ -608,16 +618,36 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
       exit(-1);
     }
 
-    /* Retrieve PTX. */
-    nvrtcGetPTXSize(prog, &ptx_size);
-    ptx = malloc(ptx_size);
-    nvrtcGetPTX(prog, ptx);
-    fprintf(stderr, "  [cuda] %s: compiled in %.2fs, PTX size %zu bytes (arch=compute_%d%d)\n",
-            kernel_name, compile_secs, ptx_size, cc_major, cc_minor);
+    /* Prefer the cubin (SASS); fall back to PTX if this toolkit will not
+     * produce one.  cache_bytes differs between the two: PTX is text and is
+     * stored without its NUL, a cubin is binary and stored whole. */
+    size_t cache_bytes = 0;
+    size_t cubin_size = 0;
+    if ((nvrtcGetCUBINSize(prog, &cubin_size) == NVRTC_SUCCESS) && (cubin_size > 0)) {
+      ptx = malloc(cubin_size);
+      if (ptx && (nvrtcGetCUBIN(prog, ptx) == NVRTC_SUCCESS)) {
+        ptx_size = cubin_size;
+        cache_bytes = cubin_size;
+        fprintf(stderr, "  [cuda] %s: compiled in %.2fs, cubin size %zu bytes (arch=sm_%d%d)\n",
+                kernel_name, compile_secs, cubin_size, cc_major, cc_minor);
+      } else {
+        free(ptx);
+        ptx = NULL;
+      }
+    }
+    if (!ptx) {
+      nvrtcGetPTXSize(prog, &ptx_size);
+      ptx = malloc(ptx_size);
+      nvrtcGetPTX(prog, ptx);
+      cache_bytes = ptx_size ? ptx_size - 1 : 0;
+      fprintf(stderr, "  [cuda] %s: compiled in %.2fs, PTX size %zu bytes (arch=sm_%d%d)\n"
+                      "  [cuda] note: no cubin available; the driver must JIT this PTX\n",
+              kernel_name, compile_secs, ptx_size, cc_major, cc_minor);
+    }
     nvrtcDestroyProgram(&prog);
     free(full);
 
-    if (have_cache) cuda_write_cache(cache_path, ptx, ptx_size);
+    if (have_cache) cuda_write_cache(cache_path, ptx, cache_bytes);
   }
 
   /* Load PTX as a CUmodule and look up the entry function. */
@@ -628,6 +658,13 @@ void load_kernel(gpu_context context, gpu_uint num_devices, const gpu_device *de
     const char *err = NULL;
     cuGetErrorString(cres, &err);
     fprintf(stderr, "cuModuleLoadData failed for %s: %s\n", kernel_name, err ? err : "(unknown)");
+    if ((cres == CUDA_ERROR_UNSUPPORTED_PTX_VERSION) || (cres == CUDA_ERROR_INVALID_SOURCE) ||
+        (cres == CUDA_ERROR_NO_BINARY_FOR_GPU))
+      fprintf(stderr,
+              "  [cuda] The host driver is older than the CUDA toolkit this was built against.\n"
+              "  [cuda] Check `nvidia-smi` for the driver version, then either use a container\n"
+              "  [cuda] image matching it, or install the matching cuda-compat package (data\n"
+              "  [cuda] centre GPUs only) and set LD_LIBRARY_PATH=/usr/local/cuda/compat.\n");
     exit(-1);
   }
 
